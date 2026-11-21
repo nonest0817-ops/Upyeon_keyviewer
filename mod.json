@@ -8,10 +8,23 @@
   },
   "id": "nonest.keyviewer",
   "name": "Key Viewer",
-  "version": "v0.1.0",
+  "version": "v0.2.0",
   "developer": "nonest",
-  "description": "Clean key viewer with note timeline, counters and KPS.",
+  "description": "Clean key viewer with note timeline, press glow, counters, KPS, presets, 2P row and drag-to-move.",
   "settings": {
+    "preset": {
+      "type": "string",
+      "default": "Custom",
+      "one-of": [
+        "Custom",
+        "Minimal",
+        "Neon",
+        "Rhythm",
+        "Mono"
+      ],
+      "name": "프리셋",
+      "description": "Custom은 아래 설정을 그대로 사용합니다. 다른 프리셋은 색상과 효과를 덮어씁니다. (위치와 크기는 유지)"
+    },
     "show-timeline": {
       "type": "bool",
       "default": true,
@@ -35,6 +48,18 @@
       "default": true,
       "name": "총 입력 수",
       "description": "총 입력 횟수를 표시합니다."
+    },
+    "show-glow": {
+      "type": "bool",
+      "default": true,
+      "name": "눌림 글로우",
+      "description": "누르는 동안 박스 주변이 은은하게 빛납니다."
+    },
+    "show-p2": {
+      "type": "bool",
+      "default": false,
+      "name": "2P 줄 따로 표시",
+      "description": "2인 모드/듀얼에서 1P와 2P 입력을 나눠 표시합니다. 실험적 기능입니다."
     },
     "reset-on-restart": {
       "type": "bool",
@@ -70,7 +95,8 @@
       "control": {
         "slider": true
       },
-      "name": "가로 위치 (%)"
+      "name": "가로 위치 (%)",
+      "description": "일시정지 화면에서 박스를 드래그해도 이동합니다."
     },
     "pos-y": {
       "type": "float",
@@ -80,7 +106,8 @@
       "control": {
         "slider": true
       },
-      "name": "세로 위치 (%)"
+      "name": "세로 위치 (%)",
+      "description": "일시정지 화면에서 박스를 드래그해도 이동합니다."
     },
     "note-speed": {
       "type": "float",
