@@ -8,7 +8,7 @@
   },
   "id": "nonest.keyviewer",
   "name": "Key Viewer",
-  "version": "v0.4.0",
+  "version": "v0.4.1",
   "developer": "nonest",
   "description": "Dark, glowing key viewer with rising notes, counters, KPS, presets, per-key colors and drag-to-move.",
   "settings": {
@@ -23,56 +23,56 @@
         "Light",
         "Minimal"
       ],
-      "name": "프리셋",
-      "description": "Custom은 아래 설정을 그대로 사용합니다. 다른 프리셋은 색과 효과를 덮어씁니다. (위치와 크기는 유지)"
+      "name": "Preset",
+      "description": "Custom uses the settings below. Other presets override colors and effects. Position and size are kept."
     },
     "show-timeline": {
       "type": "bool",
       "default": true,
-      "name": "노트 타임라인",
-      "description": "입력이 막대로 위로 흐르게 표시합니다."
+      "name": "Note Timeline",
+      "description": "Show presses as bars rising upward."
     },
     "show-counter": {
       "type": "bool",
       "default": true,
-      "name": "키 카운터",
-      "description": "각 키 박스 안에 누른 횟수를 표시합니다."
+      "name": "Key Counters",
+      "description": "Show the press count inside each key box."
     },
     "show-kps": {
       "type": "bool",
       "default": true,
-      "name": "KPS 표시",
-      "description": "초당 입력 수와 최대값을 표시합니다."
+      "name": "KPS Display",
+      "description": "Show keys per second and the max value."
     },
     "show-total": {
       "type": "bool",
       "default": true,
-      "name": "총 입력 수",
-      "description": "총 입력 횟수를 표시합니다."
+      "name": "Total Presses",
+      "description": "Show the total number of presses."
     },
     "show-glow": {
       "type": "bool",
       "default": true,
-      "name": "눌림 글로우",
-      "description": "누르는 동안 박스 주변이 빛납니다."
+      "name": "Press Glow",
+      "description": "Soft glow around a key box while it is pressed."
     },
     "note-glow": {
       "type": "bool",
       "default": true,
-      "name": "노트 글로우",
-      "description": "노트 막대 주변에 부드러운 빛 번짐을 넣습니다."
+      "name": "Note Glow",
+      "description": "Soft glow around the rising note bars."
     },
     "show-p2": {
       "type": "bool",
       "default": false,
-      "name": "2P 줄 따로 표시",
-      "description": "2인 모드/듀얼에서 1P와 2P 입력을 나눠 표시합니다. 실험적 기능입니다."
+      "name": "Separate P2 Row",
+      "description": "Show P1 and P2 inputs separately in 2-player or dual levels. Experimental."
     },
     "reset-on-restart": {
       "type": "bool",
       "default": false,
-      "name": "재시작 시 카운터 리셋",
-      "description": "리트라이할 때마다 카운터와 KPS를 초기화합니다."
+      "name": "Reset On Restart",
+      "description": "Reset counters and KPS on every retry."
     },
     "box-size": {
       "type": "float",
@@ -82,7 +82,7 @@
       "control": {
         "slider": true
       },
-      "name": "박스 크기"
+      "name": "Box Size"
     },
     "jump-width": {
       "type": "float",
@@ -92,8 +92,8 @@
       "control": {
         "slider": true
       },
-      "name": "점프 박스 가로 배율",
-      "description": "1.0이면 정사각형입니다. 크게 만들려면 올리세요."
+      "name": "Jump Box Width",
+      "description": "1.0 is a square box. Raise it for a wider jump box."
     },
     "corner-radius": {
       "type": "float",
@@ -103,7 +103,7 @@
       "control": {
         "slider": true
       },
-      "name": "모서리 둥글기 (%)"
+      "name": "Corner Roundness (%)"
     },
     "box-gap": {
       "type": "float",
@@ -113,7 +113,7 @@
       "control": {
         "slider": true
       },
-      "name": "박스 간격"
+      "name": "Box Gap"
     },
     "tile-opacity": {
       "type": "int",
@@ -123,7 +123,7 @@
       "control": {
         "slider": true
       },
-      "name": "평소 박스 투명도"
+      "name": "Idle Box Opacity"
     },
     "tile-color": {
       "type": "rgb",
@@ -132,7 +132,7 @@
         18,
         22
       ],
-      "name": "평소 박스 색"
+      "name": "Idle Box Color"
     },
     "pressed-color": {
       "type": "rgb",
@@ -141,25 +141,25 @@
         226,
         232
       ],
-      "name": "눌린 박스 색"
+      "name": "Pressed Box Color"
     },
     "label-jump": {
       "type": "string",
       "default": "JUMP",
-      "name": "점프 키 글자",
-      "description": "영문, 숫자, 기호만 가능합니다. 최대 6글자."
+      "name": "Jump Label",
+      "description": "Letters, numbers and symbols only. Max 6 characters."
     },
     "label-left": {
       "type": "string",
       "default": "<",
-      "name": "왼쪽 키 글자",
-      "description": "플랫포머 레벨에서 표시됩니다."
+      "name": "Left Label",
+      "description": "Shown in platformer levels."
     },
     "label-right": {
       "type": "string",
       "default": ">",
-      "name": "오른쪽 키 글자",
-      "description": "플랫포머 레벨에서 표시됩니다."
+      "name": "Right Label",
+      "description": "Shown in platformer levels."
     },
     "accent-jump": {
       "type": "rgb",
@@ -168,7 +168,7 @@
         255,
         255
       ],
-      "name": "점프 키 노트/글로우 색"
+      "name": "Jump Note/Glow Color"
     },
     "accent-left": {
       "type": "rgb",
@@ -177,7 +177,7 @@
         255,
         255
       ],
-      "name": "왼쪽 키 노트/글로우 색"
+      "name": "Left Note/Glow Color"
     },
     "accent-right": {
       "type": "rgb",
@@ -186,7 +186,7 @@
         255,
         255
       ],
-      "name": "오른쪽 키 노트/글로우 색"
+      "name": "Right Note/Glow Color"
     },
     "note-width": {
       "type": "float",
@@ -196,8 +196,8 @@
       "control": {
         "slider": true
       },
-      "name": "노트 두께 (%)",
-      "description": "박스 가로폭 대비 노트의 두께입니다. 100이면 박스와 같은 폭입니다."
+      "name": "Note Thickness (%)",
+      "description": "Note width relative to the box width. 100 matches the box."
     },
     "note-min-length": {
       "type": "float",
@@ -207,8 +207,8 @@
       "control": {
         "slider": true
       },
-      "name": "노트 최소 길이",
-      "description": "짧게 눌러도 노트가 이 길이 이상으로 보입니다."
+      "name": "Note Min Length",
+      "description": "Even a quick tap is drawn at least this long."
     },
     "note-speed": {
       "type": "float",
@@ -218,7 +218,7 @@
       "control": {
         "slider": true
       },
-      "name": "노트 속도"
+      "name": "Note Speed"
     },
     "note-height": {
       "type": "float",
@@ -228,7 +228,7 @@
       "control": {
         "slider": true
       },
-      "name": "타임라인 길이"
+      "name": "Timeline Length"
     },
     "pos-x": {
       "type": "float",
@@ -238,8 +238,8 @@
       "control": {
         "slider": true
       },
-      "name": "가로 위치 (%)",
-      "description": "일시정지 화면에서 박스를 드래그해도 이동합니다."
+      "name": "Position X (%)",
+      "description": "You can also drag the key viewer while the pause menu is open."
     },
     "pos-y": {
       "type": "float",
@@ -249,8 +249,8 @@
       "control": {
         "slider": true
       },
-      "name": "세로 위치 (%)",
-      "description": "일시정지 화면에서 박스를 드래그해도 이동합니다."
+      "name": "Position Y (%)",
+      "description": "You can also drag the key viewer while the pause menu is open."
     }
   },
   "resources": {
