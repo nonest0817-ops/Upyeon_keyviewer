@@ -1,17 +1,133 @@
 {
-	"geode": "$GEODE_VERSION",
-	"gd": {
-		"win": "2.2081",
-		"android": "2.2081",
-		"mac": "2.2081",
-		"ios": "2.2081"
-	},
-	"id": "$MOD_ID",
-	"name": "$MOD_NAME",
-	"version": "$MOD_VERSION",
-	"developer": "$MOD_DEVELOPER",
-	"description": "$MOD_DESCRIPTION",
-	"dependencies": {
-		"geode.node-ids": ">=v1.23.3"
-	}
+  "geode": "5.9.0",
+  "gd": {
+    "win": "2.2081",
+    "android": "2.2081",
+    "mac": "2.2081",
+    "ios": "2.2081"
+  },
+  "id": "yourname.keyviewer",
+  "name": "Key Viewer",
+  "version": "v0.1.0",
+  "developer": "yourname",
+  "description": "Clean key viewer with note timeline, counters and KPS.",
+  "settings": {
+    "show-timeline": {
+      "type": "bool",
+      "default": true,
+      "name": "노트 타임라인",
+      "description": "입력이 막대로 위로 흐르게 표시합니다."
+    },
+    "show-counter": {
+      "type": "bool",
+      "default": true,
+      "name": "키 카운터",
+      "description": "각 키 박스 안에 누른 횟수를 표시합니다."
+    },
+    "show-kps": {
+      "type": "bool",
+      "default": true,
+      "name": "KPS 표시",
+      "description": "초당 입력 수와 최대값을 표시합니다."
+    },
+    "show-total": {
+      "type": "bool",
+      "default": true,
+      "name": "총 입력 수",
+      "description": "총 입력 횟수를 표시합니다."
+    },
+    "reset-on-restart": {
+      "type": "bool",
+      "default": false,
+      "name": "재시작 시 카운터 리셋",
+      "description": "리트라이할 때마다 카운터와 KPS를 초기화합니다."
+    },
+    "box-size": {
+      "type": "float",
+      "default": 40.0,
+      "min": 24.0,
+      "max": 80.0,
+      "control": {
+        "slider": true
+      },
+      "name": "박스 크기"
+    },
+    "opacity": {
+      "type": "int",
+      "default": 90,
+      "min": 20,
+      "max": 255,
+      "control": {
+        "slider": true
+      },
+      "name": "투명도"
+    },
+    "pos-x": {
+      "type": "float",
+      "default": 85.0,
+      "min": 0.0,
+      "max": 100.0,
+      "control": {
+        "slider": true
+      },
+      "name": "가로 위치 (%)"
+    },
+    "pos-y": {
+      "type": "float",
+      "default": 10.0,
+      "min": 0.0,
+      "max": 100.0,
+      "control": {
+        "slider": true
+      },
+      "name": "세로 위치 (%)"
+    },
+    "note-speed": {
+      "type": "float",
+      "default": 260.0,
+      "min": 100.0,
+      "max": 600.0,
+      "control": {
+        "slider": true
+      },
+      "name": "노트 속도"
+    },
+    "note-height": {
+      "type": "float",
+      "default": 90.0,
+      "min": 40.0,
+      "max": 220.0,
+      "control": {
+        "slider": true
+      },
+      "name": "타임라인 길이"
+    },
+    "idle-color": {
+      "type": "rgb",
+      "default": [
+        255,
+        255,
+        255
+      ],
+      "name": "기본 색상"
+    },
+    "press-color": {
+      "type": "rgb",
+      "default": [
+        120,
+        220,
+        255
+      ],
+      "name": "눌림 색상"
+    },
+    "note-color": {
+      "type": "rgb",
+      "default": [
+        120,
+        220,
+        255
+      ],
+      "name": "노트 색상"
+    }
+  }
 }
