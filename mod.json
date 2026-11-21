@@ -8,7 +8,7 @@
   },
   "id": "nonest.keyviewer",
   "name": "Key Viewer",
-  "version": "v0.3.0",
+  "version": "v0.4.0",
   "developer": "nonest",
   "description": "Dark, glowing key viewer with rising notes, counters, KPS, presets, per-key colors and drag-to-move.",
   "settings": {
@@ -83,6 +83,17 @@
         "slider": true
       },
       "name": "박스 크기"
+    },
+    "jump-width": {
+      "type": "float",
+      "default": 1.0,
+      "min": 0.5,
+      "max": 3.0,
+      "control": {
+        "slider": true
+      },
+      "name": "점프 박스 가로 배율",
+      "description": "1.0이면 정사각형입니다. 크게 만들려면 올리세요."
     },
     "corner-radius": {
       "type": "float",
@@ -177,6 +188,28 @@
       ],
       "name": "오른쪽 키 노트/글로우 색"
     },
+    "note-width": {
+      "type": "float",
+      "default": 100.0,
+      "min": 20.0,
+      "max": 100.0,
+      "control": {
+        "slider": true
+      },
+      "name": "노트 두께 (%)",
+      "description": "박스 가로폭 대비 노트의 두께입니다. 100이면 박스와 같은 폭입니다."
+    },
+    "note-min-length": {
+      "type": "float",
+      "default": 18.0,
+      "min": 2.0,
+      "max": 60.0,
+      "control": {
+        "slider": true
+      },
+      "name": "노트 최소 길이",
+      "description": "짧게 눌러도 노트가 이 길이 이상으로 보입니다."
+    },
     "note-speed": {
       "type": "float",
       "default": 260.0,
@@ -218,6 +251,15 @@
       },
       "name": "세로 위치 (%)",
       "description": "일시정지 화면에서 박스를 드래그해도 이동합니다."
+    }
+  },
+  "resources": {
+    "fonts": {
+      "InterBold": {
+        "path": "InterBold.otf",
+        "size": 64,
+        "charset": "32-126"
+      }
     }
   }
 }
