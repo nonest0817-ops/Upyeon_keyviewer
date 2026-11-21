@@ -8,9 +8,9 @@
   },
   "id": "nonest.keyviewer",
   "name": "Key Viewer",
-  "version": "v0.4.1",
+  "version": "v0.5.0",
   "developer": "nonest",
-  "description": "Dark, glowing key viewer with rising notes, counters, KPS, presets, per-key colors and drag-to-move.",
+  "description": "Dark, glowing key viewer with rising notes, gradient colors, counters, KPS, presets and drag-to-move.",
   "settings": {
     "preset": {
       "type": "string",
@@ -97,7 +97,7 @@
     },
     "corner-radius": {
       "type": "float",
-      "default": 20.0,
+      "default": 16.0,
       "min": 0.0,
       "max": 50.0,
       "control": {
@@ -188,6 +188,28 @@
       ],
       "name": "Right Note/Glow Color"
     },
+    "gradient-mode": {
+      "type": "string",
+      "default": "Off",
+      "one-of": [
+        "Off",
+        "Notes",
+        "Tile",
+        "Both"
+      ],
+      "name": "Gradient Colors",
+      "description": "Notes: notes blend from their color to the gradient end color. Tile: pressed boxes blend too. Both: notes and boxes."
+    },
+    "gradient-color": {
+      "type": "rgb",
+      "default": [
+        255,
+        140,
+        230
+      ],
+      "name": "Gradient End Color",
+      "description": "The color at the top of notes and pressed boxes when Gradient Colors is on."
+    },
     "note-width": {
       "type": "float",
       "default": 100.0,
@@ -260,6 +282,9 @@
         "size": 64,
         "charset": "32-126"
       }
-    }
+    },
+    "sprites": [
+      "kv_*.png"
+    ]
   }
 }
