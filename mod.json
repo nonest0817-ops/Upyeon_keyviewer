@@ -8,22 +8,23 @@
   },
   "id": "nonest.keyviewer",
   "name": "Key Viewer",
-  "version": "v0.2.0",
+  "version": "v0.3.0",
   "developer": "nonest",
-  "description": "Clean key viewer with note timeline, press glow, counters, KPS, presets, 2P row and drag-to-move.",
+  "description": "Dark, glowing key viewer with rising notes, counters, KPS, presets, per-key colors and drag-to-move.",
   "settings": {
     "preset": {
       "type": "string",
       "default": "Custom",
       "one-of": [
         "Custom",
-        "Minimal",
+        "Dark",
         "Neon",
         "Rhythm",
-        "Mono"
+        "Light",
+        "Minimal"
       ],
       "name": "프리셋",
-      "description": "Custom은 아래 설정을 그대로 사용합니다. 다른 프리셋은 색상과 효과를 덮어씁니다. (위치와 크기는 유지)"
+      "description": "Custom은 아래 설정을 그대로 사용합니다. 다른 프리셋은 색과 효과를 덮어씁니다. (위치와 크기는 유지)"
     },
     "show-timeline": {
       "type": "bool",
@@ -53,7 +54,13 @@
       "type": "bool",
       "default": true,
       "name": "눌림 글로우",
-      "description": "누르는 동안 박스 주변이 은은하게 빛납니다."
+      "description": "누르는 동안 박스 주변이 빛납니다."
+    },
+    "note-glow": {
+      "type": "bool",
+      "default": true,
+      "name": "노트 글로우",
+      "description": "노트 막대 주변에 부드러운 빛 번짐을 넣습니다."
     },
     "show-p2": {
       "type": "bool",
@@ -69,7 +76,7 @@
     },
     "box-size": {
       "type": "float",
-      "default": 40.0,
+      "default": 44.0,
       "min": 24.0,
       "max": 80.0,
       "control": {
@@ -77,15 +84,118 @@
       },
       "name": "박스 크기"
     },
-    "opacity": {
+    "corner-radius": {
+      "type": "float",
+      "default": 20.0,
+      "min": 0.0,
+      "max": 50.0,
+      "control": {
+        "slider": true
+      },
+      "name": "모서리 둥글기 (%)"
+    },
+    "box-gap": {
+      "type": "float",
+      "default": 6.0,
+      "min": 0.0,
+      "max": 24.0,
+      "control": {
+        "slider": true
+      },
+      "name": "박스 간격"
+    },
+    "tile-opacity": {
       "type": "int",
-      "default": 90,
-      "min": 20,
+      "default": 200,
+      "min": 0,
       "max": 255,
       "control": {
         "slider": true
       },
-      "name": "투명도"
+      "name": "평소 박스 투명도"
+    },
+    "tile-color": {
+      "type": "rgb",
+      "default": [
+        18,
+        18,
+        22
+      ],
+      "name": "평소 박스 색"
+    },
+    "pressed-color": {
+      "type": "rgb",
+      "default": [
+        226,
+        226,
+        232
+      ],
+      "name": "눌린 박스 색"
+    },
+    "label-jump": {
+      "type": "string",
+      "default": "JUMP",
+      "name": "점프 키 글자",
+      "description": "영문, 숫자, 기호만 가능합니다. 최대 6글자."
+    },
+    "label-left": {
+      "type": "string",
+      "default": "<",
+      "name": "왼쪽 키 글자",
+      "description": "플랫포머 레벨에서 표시됩니다."
+    },
+    "label-right": {
+      "type": "string",
+      "default": ">",
+      "name": "오른쪽 키 글자",
+      "description": "플랫포머 레벨에서 표시됩니다."
+    },
+    "accent-jump": {
+      "type": "rgb",
+      "default": [
+        255,
+        255,
+        255
+      ],
+      "name": "점프 키 노트/글로우 색"
+    },
+    "accent-left": {
+      "type": "rgb",
+      "default": [
+        255,
+        255,
+        255
+      ],
+      "name": "왼쪽 키 노트/글로우 색"
+    },
+    "accent-right": {
+      "type": "rgb",
+      "default": [
+        255,
+        255,
+        255
+      ],
+      "name": "오른쪽 키 노트/글로우 색"
+    },
+    "note-speed": {
+      "type": "float",
+      "default": 260.0,
+      "min": 100.0,
+      "max": 600.0,
+      "control": {
+        "slider": true
+      },
+      "name": "노트 속도"
+    },
+    "note-height": {
+      "type": "float",
+      "default": 90.0,
+      "min": 40.0,
+      "max": 220.0,
+      "control": {
+        "slider": true
+      },
+      "name": "타임라인 길이"
     },
     "pos-x": {
       "type": "float",
@@ -108,53 +218,6 @@
       },
       "name": "세로 위치 (%)",
       "description": "일시정지 화면에서 박스를 드래그해도 이동합니다."
-    },
-    "note-speed": {
-      "type": "float",
-      "default": 260.0,
-      "min": 100.0,
-      "max": 600.0,
-      "control": {
-        "slider": true
-      },
-      "name": "노트 속도"
-    },
-    "note-height": {
-      "type": "float",
-      "default": 90.0,
-      "min": 40.0,
-      "max": 220.0,
-      "control": {
-        "slider": true
-      },
-      "name": "타임라인 길이"
-    },
-    "idle-color": {
-      "type": "rgb",
-      "default": [
-        255,
-        255,
-        255
-      ],
-      "name": "기본 색상"
-    },
-    "press-color": {
-      "type": "rgb",
-      "default": [
-        120,
-        220,
-        255
-      ],
-      "name": "눌림 색상"
-    },
-    "note-color": {
-      "type": "rgb",
-      "default": [
-        120,
-        220,
-        255
-      ],
-      "name": "노트 색상"
     }
   }
 }
