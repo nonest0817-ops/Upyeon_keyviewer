@@ -6,10 +6,10 @@
     "mac": "2.2081",
     "ios": "2.2081"
   },
-  "id": "yourname.keyviewer",
+  "id": "nonest.keyviewer",
   "name": "Key Viewer",
   "version": "v0.1.0",
-  "developer": "yourname",
+  "developer": "nonest",
   "description": "Clean key viewer with note timeline, counters and KPS.",
   "settings": {
     "show-timeline": {
