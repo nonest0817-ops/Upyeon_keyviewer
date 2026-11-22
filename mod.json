@@ -8,9 +8,9 @@
   },
   "id": "nonest.keyviewer",
   "name": "Key Viewer",
-  "version": "v1.0.0",
+  "version": "v1.0.1",
   "developer": "nonest",
-  "description": "A customizable Geometry Dash input overlay with responsive key surfaces, note timelines, activity meters, and a live editor.",
+  "description": "A clean, customizable Geometry Dash input overlay with compact statistics, two-color note gradients, and a light or dark editor.",
   "settings": {
     "language": {
       "type": "string",
@@ -44,7 +44,7 @@
       "type": "bool",
       "default": true,
       "name": "Default KPS Box Visibility",
-      "description": "Default visibility for the KPS and peak KPS boxes."
+      "description": "Default visibility of the KPS box. Peak KPS can be enabled from the editor."
     },
     "show-total": {
       "type": "bool",
@@ -54,13 +54,13 @@
     },
     "show-glow": {
       "type": "bool",
-      "default": true,
+      "default": false,
       "name": "Press Glow",
       "description": "Soft glow around a key box while it is pressed."
     },
     "note-glow": {
       "type": "bool",
-      "default": true,
+      "default": false,
       "name": "Note Glow",
       "description": "Soft glow around the rising note bars."
     },
@@ -93,7 +93,7 @@
     },
     "corner-radius": {
       "type": "float",
-      "default": 16.0,
+      "default": 8.0,
       "min": 0.0,
       "max": 50.0,
       "control": {
@@ -114,7 +114,7 @@
     },
     "tile-opacity": {
       "type": "int",
-      "default": 200,
+      "default": 238,
       "min": 0,
       "max": 255,
       "control": {
@@ -125,18 +125,18 @@
     "tile-color": {
       "type": "rgb",
       "default": [
-        13,
-        20,
-        31
+        32,
+        29,
+        34
       ],
       "name": "Idle Box Color"
     },
     "pressed-color": {
       "type": "rgb",
       "default": [
-        226,
-        226,
-        232
+        76,
+        71,
+        80
       ],
       "name": "Pressed Box Color"
     },
@@ -161,8 +161,8 @@
     "accent-jump": {
       "type": "rgb",
       "default": [
-        111,
-        222,
+        255,
+        255,
         255
       ],
       "name": "Jump Note/Glow Color"
@@ -170,8 +170,8 @@
     "accent-left": {
       "type": "rgb",
       "default": [
-        176,
-        145,
+        255,
+        255,
         255
       ],
       "name": "Left Note/Glow Color"
@@ -179,15 +179,15 @@
     "accent-right": {
       "type": "rgb",
       "default": [
-        92,
-        234,
-        202
+        255,
+        255,
+        255
       ],
       "name": "Right Note/Glow Color"
     },
     "gradient-mode": {
       "type": "string",
-      "default": "Off",
+      "default": "Notes",
       "one-of": [
         "Off",
         "Notes",
@@ -250,7 +250,7 @@
     },
     "note-fade": {
       "type": "float",
-      "default": 1.3,
+      "default": 1.0,
       "min": 0.0,
       "max": 3.0,
       "control": {
@@ -261,7 +261,7 @@
     },
     "note-radius": {
       "type": "float",
-      "default": 14.0,
+      "default": 6.0,
       "min": 0.0,
       "max": 50.0,
       "control": {
@@ -347,35 +347,15 @@
       "name": "Position Y (%)",
       "description": "You can also drag the key viewer while the pause menu is open."
     },
-    "default-surface": {
+    "editor-theme": {
       "type": "string",
-      "default": "Alloy",
-      "name": "Default Key Surface",
-      "description": "Choose a finish for keys and statistics boxes that use the default style.",
+      "default": "Light",
+      "name": "Editor Theme",
+      "description": "Choose a light or dark editor window.",
       "one-of": [
-        "Classic",
-        "Alloy",
-        "Glass",
-        "Edge"
+        "Light",
+        "Dark"
       ]
-    },
-    "default-impact": {
-      "type": "string",
-      "default": "Sweep",
-      "name": "Default Press Response",
-      "description": "Choose the default accent animation for a key press.",
-      "one-of": [
-        "Off",
-        "Sweep",
-        "Shockwave",
-        "Sparks"
-      ]
-    },
-    "reduce-motion": {
-      "type": "bool",
-      "default": false,
-      "name": "Reduce Extra Motion",
-      "description": "Disable impact effects, key travel, hold meters and counter animations. Keep the input timeline."
     }
   },
   "resources": {

@@ -1,3 +1,10 @@
+# v1.0.1
+
+- Simplify the editor with light and dark themes and exact numeric fields.
+- Use compact key and statistics tiles. Select, move and resize statistics directly on the canvas.
+- Edit bottom and fading tip colors and opacity in a visual gradient picker.
+- Remove the preset interface and decorative key and note effects.
+
 # v1.0.0
 
 - Refresh the editor with an updated palette, color swatches, and live gameplay tile previews.

@@ -4,7 +4,6 @@
 #include <Geode/modify/PauseLayer.hpp>
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <Geode/ui/Popup.hpp>
-#include <Geode/ui/ColorPickPopup.hpp>
 #include <Geode/ui/TextInput.hpp>
 #include <array>
 #include <set>
@@ -67,9 +66,14 @@ static ccColor3B unpackC(int v) {
 
 static std::string fmtNum(float v) {
     char buf[32];
-    if (std::fabs(v - std::round(v)) < 0.01f) std::snprintf(buf, sizeof buf, "%.0f", v);
-    else std::snprintf(buf, sizeof buf, "%.1f", v);
-    return buf;
+    if (std::fabs(v - std::round(v)) < 0.0005f) std::snprintf(buf, sizeof buf, "%.0f", v);
+    else std::snprintf(buf, sizeof buf, "%.3f", v);
+    std::string result = buf;
+    if (result.find('.') != std::string::npos) {
+        while (result.back() == '0') result.pop_back();
+        if (result.back() == '.') result.pop_back();
+    }
+    return result;
 }
 
 static std::string numStr(double v) {
@@ -223,6 +227,47 @@ static CCLabelBMFont* mkLabel(CCNode* parent, std::string const& s, float scale,
 // ---------------------------------------------------------------
 // 전체 설정 묶음
 // ---------------------------------------------------------------
+struct GradientStop {
+    int color = 0xffffff;
+    int alpha = 255;
+    bool operator==(GradientStop const&) const = default;
+};
+
+using GradientStops = std::array<GradientStop, 2>;
+
+static GradientStop gradientAt(GradientStops const& stops, float t) {
+    auto a = unpackC(stops[0].color), b = unpackC(stops[1].color);
+    return {packC(lerpC(a, b, t)),
+            static_cast<int>(std::lround(stops[0].alpha + (stops[1].alpha - stops[0].alpha) * t))};
+}
+
+static CCSpriteFrame* makeGradientFrame(GradientStops const& stops) {
+    constexpr int side = 64;
+    constexpr float radius = 7.f;
+    std::array<unsigned char, side * side * 4> pixels{};
+    for (int y = 0; y < side; ++y) {
+        auto stop = gradientAt(stops, 1.f - y / float(side - 1));
+        auto color = unpackC(stop.color);
+        for (int x = 0; x < side; ++x) {
+            float dx = std::max(0.f, std::abs(x + 0.5f - side / 2.f) - (side / 2.f - radius));
+            float dy = std::max(0.f, std::abs(y + 0.5f - side / 2.f) - (side / 2.f - radius));
+            float mask = std::clamp(radius + 0.5f - std::hypot(dx, dy), 0.f, 1.f);
+            auto offset = (y * side + x) * 4;
+            pixels[offset] = color.r;
+            pixels[offset + 1] = color.g;
+            pixels[offset + 2] = color.b;
+            pixels[offset + 3] = static_cast<unsigned char>(std::lround(mask * stop.alpha));
+        }
+    }
+    auto texture = new CCTexture2D;
+    if (!texture->initWithData(pixels.data(), kCCTexture2DPixelFormat_RGBA8888, side, side, {side, side})) {
+        delete texture;
+        return nullptr;
+    }
+    texture->autorelease();
+    return CCSpriteFrame::createWithTexture(texture, {0.f, 0.f, side, side});
+}
+
 struct Look {
     float size = 44.f;
     float radius = 0.16f; // 박스 크기 대비 모서리 비율
@@ -239,18 +284,7 @@ struct Look {
     bool gradNotes = false;
     bool gradTile = false;
     bool idleGradient = false;
-    int surface = 1;
-    int impact = 1;
-    float impactStrength = 0.65f;
-    float keyTravel = 0.045f;
-    bool accentRail = true;
-    bool holdMeter = true;
-    bool noteCore = false;
-    bool statTile = false;
-    bool statMeter = false;
-    bool reduceMotion = false;
-    bool neonGradient = true;
-    ccColor3B noteGradTop = {255, 255, 255};
+    GradientStops noteGradient = {{{0xffffff, 255}, {0xffffff, 0}}};
     std::string labelJump = "JUMP";
     std::string labelLeft = "<";
     std::string labelRight = ">";
@@ -258,9 +292,7 @@ struct Look {
     float noteHeight = 90.f;
     float noteWidth = 1.0f;
     float holdLengthScale = 1.f;
-    bool reverseNoteGradient = false;
     float noteRimAlpha = 0.96f;
-    int highlightProfile = 0;
     float noteBaseGap = 5.f;
     float jumpWidth = 1.0f;
     float noteOpacity = 0.92f;
@@ -285,6 +317,8 @@ struct Look {
     float labelSize = 10.f;
     int labelColor = -1;
     bool noteAutoY = false;
+    bool statTile = false;
+    bool statSideBySide = true;
     int countArea = 0;
     int countDirection = 0;
     int countAlign = 1;
@@ -322,11 +356,6 @@ static Look readLook() {
     l.gap = static_cast<float>(m->getSettingValue<double>("box-gap"));
     l.tileOpacity = static_cast<GLubyte>(std::clamp<int64_t>(m->getSettingValue<int64_t>("tile-opacity"), 0, 255));
     l.tile = m->getSettingValue<ccColor3B>("tile-color");
-    auto appearance = m->getSettingValue<std::string>("default-surface");
-    l.surface = appearance == "Classic" ? 0 : appearance == "Glass" ? 2 : appearance == "Edge" ? 3 : 1;
-    l.reduceMotion = m->getSettingValue<bool>("reduce-motion");
-    auto motion = m->getSettingValue<std::string>("default-impact");
-    l.impact = motion == "Off" ? 0 : motion == "Shockwave" ? 2 : motion == "Sparks" ? 3 : 1;
     l.pressed = m->getSettingValue<ccColor3B>("pressed-color");
     l.accentJump = m->getSettingValue<ccColor3B>("accent-jump");
     l.accentLeft = m->getSettingValue<ccColor3B>("accent-left");
@@ -411,7 +440,6 @@ static char const* const kLabels[] = {
 };
 static constexpr int kLabelCount = static_cast<int>(sizeof(kLabels) / sizeof(kLabels[0]));
 static char const* const kMapNames[6] = {"Jump P1", "Left P1", "Right P1", "Jump P2", "Left P2", "Right P2"};
-static char const* const kGradNames[4] = {"Off", "Notes", "Tile", "Both"};
 
 static std::vector<KeyDef> g_keys;
 static int g_nextId = 0;
@@ -567,6 +595,8 @@ static Look lookForKey(Look const& base, KeyDef const& k) {
     kl.accentJump = acc;
     kl.accentLeft = acc;
     kl.accentRight = acc;
+    kl.noteGradient[0].color = packC(acc);
+    kl.noteGradient[1].color = packC(acc);
     if (k.bg >= 0) kl.tile = unpackC(k.bg);
     if (k.pressed >= 0) kl.pressed = unpackC(k.pressed);
     if (k.border >= 0) kl.border = unpackC(k.border);
@@ -577,15 +607,10 @@ static Look lookForKey(Look const& base, KeyDef const& k) {
         if (key == "label-font") kl.labelFont = static_cast<int>(std::clamp(v, 0., 3.));
         if (key == "label-size") kl.labelSize = static_cast<float>(std::clamp(v, 4., 40.));
         if (key == "label-color") kl.labelColor = static_cast<int>(std::clamp(v, 0., 16777215.));
-        if (key == "neon-gradient") kl.neonGradient = v != 0;
-        if (key == "note-gradient-top") kl.noteGradTop = unpackC(static_cast<int>(std::clamp(v, 0., 16777215.)));
-        if (key == "surface") kl.surface = static_cast<int>(std::clamp(v, 0., 3.));
-        if (key == "impact") kl.impact = static_cast<int>(std::clamp(v, 0., 3.));
-        if (key == "impact-strength") kl.impactStrength = static_cast<float>(std::clamp(v, 0., 100.)) / 100.f;
-        if (key == "key-travel") kl.keyTravel = static_cast<float>(std::clamp(v, 0., 12.)) / 100.f;
-        if (key == "accent-rail") kl.accentRail = v != 0;
-        if (key == "hold-meter") kl.holdMeter = v != 0;
-        if (key == "note-core") kl.noteCore = v != 0;
+        if (key == "note-gradient-bottom") kl.noteGradient[0].color = static_cast<int>(std::clamp(v, 0., 16777215.));
+        if (key == "note-gradient-top") kl.noteGradient[1].color = static_cast<int>(std::clamp(v, 0., 16777215.));
+        if (key == "gradient-bottom-alpha") kl.noteGradient[0].alpha = static_cast<int>(std::clamp(v, 0., 255.));
+        if (key == "gradient-top-alpha") kl.noteGradient[1].alpha = static_cast<int>(std::clamp(v, 0., 255.));
         if (key == "tile-idle-gradient") kl.idleGradient = v != 0;
         if (key == "note-auto-y") kl.noteAutoY = v != 0;
         if (key == "count-area") kl.countArea = static_cast<int>(std::clamp(v, 0., 1.));
@@ -604,9 +629,7 @@ static Look lookForKey(Look const& base, KeyDef const& k) {
         if (key == "count-motion-time") kl.countMotionTime = static_cast<float>(std::clamp(v, 0.05, 1.0));
         if (key == "note-width") kl.noteWidth = static_cast<float>(std::clamp(v, 20.0, 100.0)) / 100.f;
         if (key == "hold-length-scale") kl.holdLengthScale = static_cast<float>(std::clamp(v, 25., 200.)) / 100.f;
-        if (key == "gradient-reverse") kl.reverseNoteGradient = v != 0;
         if (key == "note-rim-opacity") kl.noteRimAlpha = static_cast<float>(std::clamp(v, 0., 100.)) / 100.f;
-        if (key == "note-highlight-profile") kl.highlightProfile = static_cast<int>(std::clamp(v, 0., 2.));
         if (key == "note-base-gap") kl.noteBaseGap = static_cast<float>(std::clamp(v, 0., 30.));
         if (key == "note-speed") kl.noteSpeed = static_cast<float>(std::clamp(v, 100.0, 600.0));
         if (key == "note-height") kl.noteHeight = static_cast<float>(std::clamp(v, 40.0, 220.0));
@@ -630,13 +653,9 @@ static Look lookForKey(Look const& base, KeyDef const& k) {
             kl.gradTile = v == 2 || v == 3;
         }
     }
+    // Explicit note settings take precedence over the legacy combined tile/notes selector.
+    if (auto it = k.style.find("note-gradient-enabled"); it != k.style.end()) kl.gradNotes = it->second != 0;
     kl.gradTile = kl.gradTile || kl.idleGradient;
-    if (kl.reduceMotion) {
-        kl.impact = 0;
-        kl.keyTravel = 0.f;
-        kl.countMotion = false;
-        kl.holdMeter = false;
-    }
     return kl;
 }
 
@@ -666,274 +685,6 @@ static float autoWidth(KeyDef const& k, Look const& l) {
 
 // ---------------------------------------------------------------
 // 사용자 프리셋 (현재 설정과 키 목록 전체를 이름 붙여 저장한다)
-// ---------------------------------------------------------------
-enum class SetType { Bool, Num, Int, Color, Str };
-struct SetDef {
-    char const* key;
-    SetType type;
-};
-
-static SetDef const kSetDefs[] = {
-    {"show-timeline", SetType::Bool}, {"show-counter", SetType::Bool},
-    {"show-glow", SetType::Bool}, {"note-glow", SetType::Bool},
-    {"corner-radius", SetType::Num}, {"note-width", SetType::Num},
-    {"note-speed", SetType::Num}, {"note-height", SetType::Num},
-    {"tile-opacity", SetType::Int}, {"note-opacity", SetType::Num},
-    {"note-fade", SetType::Num}, {"note-radius", SetType::Num},
-    {"note-border", SetType::Num}, {"note-glow-strength", SetType::Num}, {"note-glow-size", SetType::Num},
-    {"note-glow-custom", SetType::Bool}, {"note-border-color", SetType::Color}, {"note-glow-color", SetType::Color},
-    {"tile-color", SetType::Color}, {"pressed-color", SetType::Color}, {"accent-jump", SetType::Color},
-    {"accent-left", SetType::Color}, {"accent-right", SetType::Color}, {"gradient-color", SetType::Color},
-    {"gradient-mode", SetType::Str}
-};
-
-static StyleValues visualKeyStyle(KeyDef const& key) {
-    auto style = key.style;
-    style.erase("key-code");
-    style.erase("note-min-length");
-    return style;
-}
-
-static std::string keyStyleRecord(KeyDef const& key, char type) {
-    std::string out(1, type);
-    return out + "," + std::to_string(key.id) + "," + std::to_string(key.bg) + "," +
-        std::to_string(key.pressed) + "," + std::to_string(key.border) + "," +
-        std::to_string(key.accent) + "," + numStr(key.borderW) + "," + numStr(key.radius) + "," +
-        encodeStyle(visualKeyStyle(key)) + ";";
-}
-
-static StyleValues readPresetDefaults() {
-    StyleValues defaults;
-    auto mod = Mod::get();
-    for (auto const& d : kSetDefs) {
-        switch (d.type) {
-            case SetType::Bool: defaults[d.key] = mod->getSettingValue<bool>(d.key); break;
-            case SetType::Num: defaults[d.key] = mod->getSettingValue<double>(d.key); break;
-            case SetType::Int: defaults[d.key] = mod->getSettingValue<int64_t>(d.key); break;
-            case SetType::Color: defaults[d.key] = packC(mod->getSettingValue<ccColor3B>(d.key)); break;
-            case SetType::Str: {
-                auto mode = mod->getSettingValue<std::string>(d.key);
-                defaults[d.key] = mode == "Both" ? 3 : mode == "Tile" ? 2 : mode == "Notes" ? 1 : 0;
-                break;
-            }
-        }
-    }
-    return defaults;
-}
-
-static void includeInheritedStyle(KeyDef& snapshot, StyleValues const& defaults) {
-    auto color = [&](int& field, char const* name) {
-        const auto value = defaults.find(name);
-        if (field < 0 && value != defaults.end()) field = static_cast<int>(std::clamp(value->second, 0., 16777215.));
-    };
-    color(snapshot.bg, "tile-color");
-    color(snapshot.pressed, "pressed-color");
-    color(snapshot.accent, snapshot.map % 3 == 1 ? "accent-left" : snapshot.map % 3 == 2 ? "accent-right" : "accent-jump");
-    if (auto radius = defaults.find("corner-radius"); snapshot.radius < 0.f && radius != defaults.end())
-        snapshot.radius = static_cast<float>(std::clamp(radius->second, 0., 50.));
-    for (auto const& [key, value] : defaults) {
-        if (key == "tile-color" || key == "pressed-color" || key == "corner-radius" ||
-            key == "accent-left" || key == "accent-right" || key == "accent-jump") continue;
-        snapshot.style.try_emplace(key, value);
-    }
-}
-
-static std::string serializePreset(int target) {
-    auto key = keyById(target);
-    if (!key) return {};
-    KeyDef snapshot = *key;
-    auto inherited = readLook();
-    snapshot.style.try_emplace("surface", inherited.surface);
-    snapshot.style.try_emplace("impact", inherited.impact);
-    includeInheritedStyle(snapshot, readPresetDefaults());
-    return keyStyleRecord(snapshot, 'A');
-}
-
-static void applyKeyStyle(KeyDef& current, KeyDef const& style) {
-    current.bg = style.bg;
-    current.pressed = style.pressed;
-    current.border = style.border;
-    current.accent = style.accent;
-    current.borderW = style.borderW;
-    current.radius = style.radius;
-    auto visual = visualKeyStyle(style);
-    if (auto binding = current.style.find("key-code"); binding != current.style.end()) visual.insert(*binding);
-    current.style = std::move(visual);
-    saveKey(current);
-}
-
-static bool applyPresetData(std::string const& data, int target) {
-    auto current = keyById(target);
-    if (!current) return false;
-    std::vector<KeyDef> styles;
-    StyleValues defaults;
-    for (auto const& record : splitStr(data, ';')) {
-        auto fields = splitStr(record, ',');
-        if (fields[0] == "S" && fields.size() == 3) {
-            auto setting = std::find_if(std::begin(kSetDefs), std::end(kSetDefs),
-                [&](SetDef const& d) { return fields[1] == d.key; });
-            if (setting == std::end(kSetDefs)) continue;
-            auto const& value = fields[2];
-            double parsed = setting->type == SetType::Str
-                ? (value == "Both" ? 3 : value == "Tile" ? 2 : value == "Notes" ? 1 : 0)
-                : std::atof(value.c_str());
-            if (std::isfinite(parsed)) defaults[setting->key] = parsed;
-        } else if (fields[0] == "K" || fields[0] == "Y" || fields[0] == "A") {
-            bool legacy = fields[0] == "K";
-            if (fields.size() < (legacy ? 14u : 9u)) return false;
-            KeyDef style;
-            style.id = std::atoi(fields[1].c_str());
-            style.map = legacy ? std::clamp(std::atoi(fields[2].c_str()), 0, 5) : current->map;
-            size_t first = legacy ? 7 : 2;
-            style.bg = std::atoi(fields[first].c_str());
-            style.pressed = std::atoi(fields[first + 1].c_str());
-            style.border = std::atoi(fields[first + 2].c_str());
-            style.accent = std::atoi(fields[first + 3].c_str());
-            style.borderW = static_cast<float>(std::atof(fields[first + 4].c_str()));
-            style.radius = static_cast<float>(std::atof(fields[first + 5].c_str()));
-            size_t styleIndex = legacy ? 14 : 8;
-            if (fields.size() > styleIndex) style.style = decodeStyle(fields[styleIndex]);
-            if (!std::isfinite(style.borderW) || !std::isfinite(style.radius)) return false;
-            style.borderW = std::clamp(style.borderW, 0.f, 6.f);
-            style.radius = std::clamp(style.radius, -1.f, 50.f);
-            styles.push_back(std::move(style));
-        }
-    }
-    if (styles.empty()) return false;
-    auto match = std::find_if(styles.begin(), styles.end(),
-        [target](KeyDef const& style) { return style.id == target; });
-    auto style = match == styles.end() ? styles.front() : *match;
-    includeInheritedStyle(style, defaults);
-    applyKeyStyle(*current, style);
-    return true;
-}
-
-static const std::array<char const*, 3> kPhotoPresets = {"Red neon", "Cyan glass", "Red-white tip"};
-
-static std::string photoPreset(int index) {
-    auto i = std::clamp(index, 0, 2);
-    constexpr std::array<int, 3> bottom = {0xff1627, 0x00dce9, 0xf60019};
-    constexpr std::array<int, 3> top = {0xffe3e9, 0xbafcff, 0xfffbfb};
-    constexpr std::array<int, 3> edge = {0xffb0b9, 0xd5fbff, 0xffc4ca};
-    KeyDef key;
-    key.bg = i == 1 ? 0x182c37 : 0x0a0d13;
-    key.pressed = i == 1 ? 0xb0fbff : 0xffffff;
-    key.border = i == 1 ? 0x557287 : 0x526477;
-    key.borderW = i == 2 ? 0.4f : 0.7f;
-    key.accent = bottom[i];
-    key.radius = i == 1 ? 8.f : 5.f;
-    key.style = {
-        {"show-timeline", 1}, {"note-glow", 1}, {"show-glow", 1}, {"gradient-mode", 3},
-        {"neon-gradient", 1}, {"note-gradient-top", double(top[i])},
-        {"gradient-color", double(i == 1 ? 0x344957 : 0x435164)},
-        {"tile-idle-gradient", i == 2 ? 0. : 1.}, {"tile-opacity", 230},
-        {"note-highlight-profile", i == 2 ? 2. : i == 1 ? 1. : 0.},
-        {"note-glow-custom", 1}, {"note-glow-color", double(bottom[i])},
-        {"note-glow-strength", i == 0 ? 155. : i == 1 ? 110. : 65.},
-        {"note-glow-size", i == 0 ? 106. : i == 1 ? 82. : 64.},
-        {"note-border", i == 2 ? 0.85 : 1.35}, {"note-border-color", double(edge[i])},
-        {"note-rim-opacity", 99}, {"note-width", i == 0 ? 91. : 94.},
-        {"note-radius", i == 1 ? 9. : 5.}, {"note-opacity", i == 1 ? 82. : 97.},
-        {"note-fade", i == 2 ? 0.55 : 0.80}, {"note-speed", i == 2 ? 340. : 275.},
-        {"note-height", i == 2 ? 180. : 127.}, {"note-base-gap", i == 2 ? 1. : 5.},
-        {"hold-length-scale", i == 2 ? 128. : 100.},
-        {"surface", i == 2 ? 0. : 1.}, {"impact", 0.}, {"key-travel", 0.},
-        {"accent-rail", 0.}, {"hold-meter", 0.},
-        {"label-color", double(i == 2 ? 0xe6e8ed : 0xfafaff)}, {"label-size", i == 2 ? 8. : 7.},
-        {"count-color", double(0xfafaff)}, {"count-size", 7.}
-    };
-    return keyStyleRecord(key, 'A');
-}
-
-struct StudioStyle {
-    char const* title;
-    int accent;
-    int face;
-    int active;
-    int highlight;
-    int surface;
-    int response;
-    float radius;
-    float speed;
-};
-
-static const std::array<StudioStyle, 6> kStudioStyles = {{
-    {"Alloy Ice",     0x65dcff, 0x0c1625, 0x9feaff, 0xd1f8ff, 1, 1, 13.f, 290.f},
-    {"Comet Violet",  0xab67ff, 0x170d31, 0xc0a6ff, 0xefe5ff, 2, 3, 22.f, 315.f},
-    {"Amber Torque",  0xffa42c, 0x1f160a, 0xffc25e, 0xfff0cc, 3, 2,  6.f, 275.f},
-    {"Aqua Signal",   0x34f4c4, 0x082120, 0x66ffd9, 0xbdffeb, 3, 1,  9.f, 335.f},
-    {"Midnight Rose", 0xf65a9e, 0x231123, 0xffaecf, 0xffe3f3, 2, 2, 18.f, 263.f},
-    {"Mono Grid",     0xc6d3e3, 0x101116, 0xecf1f8, 0xffffff, 1, 0,  8.f, 250.f},
-}};
-
-static std::string studioPreset(StudioStyle const& theme) {
-    const bool quiet = theme.response == 0;
-    KeyDef key;
-    key.bg = theme.face;
-    key.pressed = theme.active;
-    key.accent = theme.accent;
-    key.radius = theme.radius;
-    key.border = packC(lerpC(unpackC(theme.face), unpackC(theme.accent), 0.43f));
-    key.borderW = theme.surface == 3 ? 1.2f : 0.65f;
-    key.style = {
-        {"surface", double(theme.surface)}, {"impact", double(theme.response)}, {"impact-strength", quiet ? 0. : 72.},
-        {"key-travel", quiet ? 2. : theme.surface == 3 ? 7. : 5.}, {"accent-rail", 1.}, {"hold-meter", quiet ? 0. : 1.},
-        {"tile-opacity", 229.}, {"show-glow", quiet ? 0. : 1.}, {"show-timeline", 1.}, {"note-glow", quiet ? 0. : 1.},
-        {"gradient-mode", 3.}, {"gradient-color", double(packC(lerpC(unpackC(theme.face), unpackC(theme.accent), 0.24f)))},
-        {"tile-idle-gradient", theme.surface == 2 ? 1. : 0.}, {"neon-gradient", quiet ? 0. : 1.},
-        {"note-highlight-profile", theme.surface == 2 ? 2. : 1.}, {"note-gradient-top", double(theme.highlight)},
-        {"note-glow-custom", 1.}, {"note-glow-color", double(theme.accent)},
-        {"note-glow-size", theme.surface == 2 ? 114. : 84.}, {"note-glow-strength", theme.surface == 2 ? 124. : 91.},
-        {"note-core", quiet ? 0. : 1.}, {"note-rim-opacity", quiet ? 72. : 94.},
-        {"note-border", theme.surface == 3 ? 1.0 : 0.68},
-        {"note-border-color", double(packC(lerpC(unpackC(theme.accent), {255, 255, 255}, 0.66f)))},
-        {"note-width", theme.surface == 3 ? 78. : 90.}, {"note-radius", double(theme.radius) * 0.68},
-        {"note-opacity", quiet ? 82. : 93.}, {"note-fade", theme.surface == 2 ? 0.95 : 1.25},
-        {"note-speed", double(theme.speed)}, {"note-height", theme.surface == 2 ? 142. : 116.},
-        {"note-base-gap", 5.}, {"count-motion", quiet ? 0. : 1.}, {"count-motion-amount", 16.},
-        {"count-motion-time", 0.20},
-    };
-    return keyStyleRecord(key, 'A');
-}
-
-static int presetCount() {
-    return static_cast<int>(Mod::get()->getSavedValue<int64_t>("pr_count", 0));
-}
-
-static std::string presetName(int i) {
-    return Mod::get()->getSavedValue<std::string>("pr_" + std::to_string(i) + "_name", "Preset");
-}
-
-static std::string presetData(int i) {
-    return Mod::get()->getSavedValue<std::string>("pr_" + std::to_string(i) + "_data", "");
-}
-
-static void presetSetData(int i, std::string const& data) {
-    Mod::get()->setSavedValue<std::string>("pr_" + std::to_string(i) + "_data", data);
-}
-
-static void presetAdd(std::string const& data, std::string const& name = {}) {
-    auto m = Mod::get();
-    int n = presetCount();
-    int next = static_cast<int>(m->getSavedValue<int64_t>("pr_next", 1));
-    m->setSavedValue<std::string>("pr_" + std::to_string(n) + "_name", name.empty() ? "Preset " + std::to_string(next) : name);
-    m->setSavedValue<std::string>("pr_" + std::to_string(n) + "_data", data);
-    m->setSavedValue<int64_t>("pr_next", next + 1);
-    m->setSavedValue<int64_t>("pr_count", n + 1);
-}
-
-static void presetDelete(int i) {
-    auto m = Mod::get();
-    int n = presetCount();
-    for (int j = i; j < n - 1; j++) {
-        m->setSavedValue<std::string>("pr_" + std::to_string(j) + "_name", presetName(j + 1));
-        m->setSavedValue<std::string>("pr_" + std::to_string(j) + "_data", presetData(j + 1));
-    }
-    m->setSavedValue<int64_t>("pr_count", std::max(0, n - 1));
-}
-
-// ---------------------------------------------------------------
-// 노트 하나가 쓰는 이미지 3장 (글로우, 본체, 색 그라데이션)
 // ---------------------------------------------------------------
 static std::array<char const*, 4> const kFonts = {
     "InterBold.fnt"_spr, "ViewerUI.fnt"_spr, "bigFont.fnt", "goldFont.fnt"
@@ -979,27 +730,25 @@ static float textCenterY(Look const& look, float height) {
 struct NoteSprites {
     CCScale9Sprite* glow = nullptr;
     CCScale9Sprite* base = nullptr;
-    CCScale9Sprite* grad = nullptr;
-    CCScale9Sprite* solid = nullptr;
-    CCScale9Sprite* linear = nullptr;
-    CCScale9Sprite* head = nullptr;
+    CCScale9Sprite* gradient = nullptr;
+
+    void hide() const {
+        if (glow) glow->setVisible(false);
+        if (base) base->setVisible(false);
+        if (gradient) gradient->setVisible(false);
+    }
 };
 
 static NoteSprites createNoteSprites(CCNode* parent) {
     NoteSprites s;
     s.glow = CCScale9Sprite::create("kv_glow.png"_spr);
-    s.base = CCScale9Sprite::create("kv_fade2.png"_spr);
-    s.grad = CCScale9Sprite::create("kv_grad2.png"_spr);
-    s.solid = CCScale9Sprite::create("kv_solid.png"_spr);
-    s.linear = CCScale9Sprite::create("kv_linear.png"_spr);
-    s.head = CCScale9Sprite::create("kv_head.png"_spr);
-    if (!s.glow || !s.base || !s.grad || !s.solid || !s.linear || !s.head) return {};
+    s.base = CCScale9Sprite::create("kv_solid.png"_spr);
+    s.gradient = CCScale9Sprite::create("kv_solid.png"_spr);
+    if (!s.glow || !s.base || !s.gradient) return {};
     parent->addChild(s.glow, 0);
     parent->addChild(s.base, 1);
-    parent->addChild(s.solid, 1);
-    parent->addChild(s.grad, 2);
-    parent->addChild(s.linear, 2);
-    parent->addChild(s.head, 2);
+    parent->addChild(s.gradient, 1);
+    s.hide();
     return s;
 }
 
@@ -1012,66 +761,45 @@ static float noteSpriteScale(float radius, float width, float length) {
     return std::min({std::max(0.04f, radius / kBaseR), width / kCap, length / kCap});
 }
 
-static bool neonNote(Look const& look) {
-    return look.gradNotes && look.neonGradient;
-}
-
 static void sizeNote(NoteSprites const& s, float w, float h, float rounding, float glowScale) {
     float pad = kGlowPad * glowScale;
     fitSize(s.base, w, h, rounding);
-    fitSize(s.solid, w, h, rounding);
-    fitSize(s.grad, w, h, rounding);
-    fitSize(s.linear, w, h, rounding);
-    fitSize(s.head, w, h, rounding);
+    fitSize(s.gradient, w, h, rounding);
     fitSize(s.glow, w + 2 * pad, h + 2 * pad, glowScale);
 }
 
+static void useGradientFrame(NoteSprites const& sprites, CCSpriteFrame* frame) {
+    if (!frame) return;
+    sprites.gradient->setSpriteFrame(frame);
+    sprites.gradient->setCapInsets({8.f, 8.f, 48.f, 48.f});
+}
+
 static void paintNote(NoteSprites const& s, CCDrawNode* border, Look const& look,
-                      float x, float y, float w, float h, float rounding, float glowScale, float fade) {
-    bool neon = neonNote(look);
+                      float x, float y, float w, float h, float rounding, float glowScale, float fade, bool gradient) {
     float pad = kGlowPad * glowScale;
     float opacity = std::clamp(look.noteOpacity, 0.05f, 1.f) * fade;
     auto accent = look.accentJump;
-    auto top = neon ? look.noteGradTop : look.gradEnd;
-    auto fill = neon ? s.solid : s.base;
-    s.base->setVisible(!neon);
-    s.solid->setVisible(neon);
+    auto fill = gradient ? s.gradient : s.base;
+    s.base->setVisible(!gradient);
+    s.gradient->setVisible(gradient);
     placeCenter(fill, x, y, w, h);
-    fill->setColor(accent);
+    fill->setColor(gradient ? ccColor3B{255, 255, 255} : accent);
     setOp(fill, opacity);
-    auto gradient = look.highlightProfile == 1 ? s.linear : look.highlightProfile == 2 ? s.head : s.grad;
-    for (auto layer : {s.grad, s.linear, s.head}) layer->setVisible(look.gradNotes && layer == gradient);
-    if (look.gradNotes) {
-        placeCenter(gradient, x, y, w, h);
-        gradient->setScaleY(look.reverseNoteGradient ? -rounding : rounding);
-        gradient->setColor(top);
-        setOp(gradient, opacity);
-    }
 
     bool glow = look.noteGlow && look.glowStrength > 0.01f;
     s.glow->setVisible(glow);
     if (glow) {
-        auto glowColor = look.glowCustom ? look.glowColor : accent;
-        if (!neon && !look.glowCustom && look.gradNotes) glowColor = lerpC(accent, top, 0.5f);
+        auto color = look.glowCustom ? look.glowColor : gradient ? unpackC(look.noteGradient[0].color) : accent;
         placeCenter(s.glow, x - pad, y - pad, w + 2 * pad, h + 2 * pad);
-        s.glow->setColor(glowColor);
-        setOp(s.glow, (neon ? 0.75f : 0.45f) * look.glowStrength * fade);
+        s.glow->setColor(color);
+        float visible = gradient ? (look.noteGradient[0].alpha + look.noteGradient[1].alpha) / 510.f : 1.f;
+        setOp(s.glow, 0.45f * look.glowStrength * fade * visible);
     }
 
-    if (look.noteBorder > 0.f || neon) {
-        float thickness = look.noteBorder > 0.f ? look.noteBorder : std::clamp(w * 0.035f, 0.55f, 1.4f);
-        thickness = std::min(thickness, h * 0.28f);
-        auto edge = look.noteBorder > 0.f ? look.noteBorderColor : lerpC(accent, {255, 255, 255}, 0.80f);
-        float edgeOpacity = (neon ? fade : std::min(1.f, opacity + 0.15f)) * look.noteRimAlpha;
-        dnStrokeA(border, x, y, x + w, y + h, rounding * kBaseR, edge, thickness, edgeOpacity, 4);
-    }
-    if (look.noteCore && w >= 6.f && h >= 4.f) {
-        float ribbonWidth = std::clamp(w * 0.07f, 0.65f, 2.4f);
-        float inset = std::clamp(w * 0.14f, 1.5f, 5.f);
-        float rise = std::min(h * 0.54f, 19.f);
-        float topY = y + h - std::min(2.f, h * 0.17f);
-        dnRound(border, x + inset, topY - rise, x + inset + ribbonWidth, topY,
-                ribbonWidth * 0.5f, lerpC(accent, {255, 255, 255}, 0.78f), 0.55f * opacity, 3);
+    if (look.noteBorder > 0.f) {
+        float thickness = std::min(look.noteBorder, h * 0.28f);
+        dnStrokeA(border, x, y, x + w, y + h, rounding * kBaseR, look.noteBorderColor,
+                  thickness, opacity * look.noteRimAlpha, 4);
     }
 }
 
@@ -1080,6 +808,7 @@ struct Note {
     double start = 0.0;
     double end = -1.0; // 아직 누르는 중이면 -1
     NoteSprites sp;
+    unsigned gradientVersion = 0;
     float lw = -1.f, lh = -1.f, ls = -1.f, lg = -1.f; // 마지막으로 적용한 크기 (불필요한 재계산 방지)
 };
 
@@ -1096,24 +825,13 @@ protected:
     double m_countStart = -1.0;
     float m_noteSpace = 0.f;
     float m_noteStart = 0.f;
-    float m_press = 0.f;
-    float m_activity = 0.f;
-    float m_lastMeter = -1.f;
-    double m_strikeAt = -1.0;
-    double m_heldAt = -1.0;
-    bool m_preview = false;
-    bool m_previewDown = false;
-    bool m_fxWasVisible = false;
-    CCNode* m_face = nullptr;
-    CCDrawNode* m_surfaceDetail = nullptr;
-    CCDrawNode* m_response = nullptr; // 0 = 평소, 1 = 눌림 (부드럽게 변함)
+    float m_press = 0.f; // 0 = 평소, 1 = 눌림 (부드럽게 변함)
     float m_lw = -1.f, m_lh = -1.f, m_ls = -1.f;
     Look m_look;
     std::string m_nameStr;
     CCScale9Sprite* m_glow = nullptr;
     CCScale9Sprite* m_tile = nullptr;
     CCScale9Sprite* m_tileGrad = nullptr;
-    CCScale9Sprite* m_sheen = nullptr;
     CCDrawNode* m_border = nullptr;
     CCNode* m_noteLayer = nullptr;
     CCDrawNode* m_noteBorder = nullptr;
@@ -1121,6 +839,24 @@ protected:
     CCLabelBMFont* m_count = nullptr;
     std::deque<Note> m_notes;
     std::vector<NoteSprites> m_pool;
+    CCSpriteFrame* m_gradientFrame = nullptr;
+    GradientStops m_gradientStops{};
+    unsigned m_gradientVersion = 0;
+
+    ~KeyLane() override {
+        if (m_gradientFrame) m_gradientFrame->release();
+    }
+
+    void refreshGradient(Look const& look) {
+        if (!look.gradNotes || (m_gradientFrame && m_gradientStops == look.noteGradient)) return;
+        auto frame = makeGradientFrame(look.noteGradient);
+        if (!frame) return;
+        frame->retain();
+        if (m_gradientFrame) m_gradientFrame->release();
+        m_gradientFrame = frame;
+        m_gradientStops = look.noteGradient;
+        ++m_gradientVersion;
+    }
 
     bool init(std::string const& name) {
         if (!CCNode::init()) return false;
@@ -1129,41 +865,28 @@ protected:
         m_glow = CCScale9Sprite::create("kv_glow.png"_spr);
         m_tile = CCScale9Sprite::create("kv_solid.png"_spr);
         m_tileGrad = CCScale9Sprite::create("kv_grad2.png"_spr);
-        m_sheen = CCScale9Sprite::create("kv_linear.png"_spr);
-        if (!m_glow || !m_tile || !m_tileGrad || !m_sheen) return false;
-        m_face = CCNode::create();
-        m_face->setAnchorPoint({0.5f, 0.5f});
+        if (!m_glow || !m_tile || !m_tileGrad) return false;
 
         m_noteLayer = CCNode::create();
         this->addChild(m_noteLayer, -1);
         m_noteBorder = CCDrawNode::create();
         m_noteLayer->addChild(m_noteBorder, 5);
         this->addChild(m_glow, -2);
-        this->addChild(m_face, 0);
-        m_face->addChild(m_tile, 0);
-        m_face->addChild(m_tileGrad, 1);
-        m_face->addChild(m_sheen, 2);
-
-        m_surfaceDetail = CCDrawNode::create();
-        m_face->addChild(m_surfaceDetail, 3);
-        m_response = CCDrawNode::create();
-        this->addChild(m_response, 1);
+        this->addChild(m_tile, 0);
+        this->addChild(m_tileGrad, 1);
 
         m_border = CCDrawNode::create();
-        m_face->addChild(m_border, 4);
+        this->addChild(m_border, 2);
 
         m_name = CCLabelBMFont::create(name.c_str(), hasHangul(name) ? "KeyNames.fnt"_spr : "InterBold.fnt"_spr);
-        if (!m_name) return false;
-        m_face->addChild(m_name, 5);
+        this->addChild(m_name, 3);
 
         m_count = CCLabelBMFont::create("0", "InterBold.fnt"_spr);
-        if (!m_count) return false;
         for (auto& border : m_countOutline) {
             border = CCLabelBMFont::create("0", kFonts[0]);
-            if (!border) return false;
-            m_face->addChild(border, 5);
+            this->addChild(border, 3);
         }
-        m_face->addChild(m_count, 6);
+        this->addChild(m_count, 4);
         return true;
     }
 
@@ -1182,18 +905,14 @@ protected:
 
     void release(NoteSprites const& s) {
         if (!s.base) return;
-        s.glow->setVisible(false);
-        s.base->setVisible(false);
-        s.solid->setVisible(false);
-        s.linear->setVisible(false);
-        s.head->setVisible(false);
-        s.grad->setVisible(false);
+        s.hide();
         m_pool.push_back(s);
     }
 
     void fitCount(double now = nowSec()) {
         const bool outside = m_look.countArea == 1;
-        float scale = labelScale(m_count, m_look.countSize, outside ? 400.f : m_w * 0.84f);
+        bool inlineStat = m_look.statTile && m_look.statSideBySide;
+        float scale = labelScale(m_count, m_look.countSize, outside ? 400.f : m_w * (inlineStat ? 0.34f : 0.84f));
         float width = m_count->getContentSize().width * scale;
         float height = m_count->getContentSize().height * scale;
         float t = static_cast<float>((now - m_countStart) / m_look.countMotionTime);
@@ -1201,7 +920,8 @@ protected:
             ? m_look.countMotionAmount / 100.f * (1.f - t) : 0.f;
         if (m_look.countMotionType == 0) scale *= 1.f + motion;
         auto pos = counterPosition(m_look, m_w, m_h, width, height);
-        float x = pos.x, y = pos.y;
+        float x = inlineStat ? m_w - width / 2.f - 6.f : pos.x;
+        float y = inlineStat ? m_h / 2.f : pos.y;
         if (m_look.countMotionType == 1) y += 16.f * motion;
         m_count->setPosition({x, y});
         m_count->setScale(scale);
@@ -1228,82 +948,9 @@ protected:
 
     void drawBorder() {
         m_border->clear();
-        if (m_look.borderW <= 0.f || m_w < 3.f || m_h < 3.f) return;
+        if (m_look.borderW <= 0.f) return;
         float r = std::min(std::max(m_look.radius * m_h, 2.f), std::min(m_w, m_h) / 2.f);
         dnStroke(m_border, 0.5f, 0.5f, m_w - 0.5f, m_h - 0.5f, r, m_look.border, m_look.borderW, 5);
-    }
-
-    void drawSurface(float p, float opacity) {
-        m_surfaceDetail->clear();
-        if (m_w < 8.f || m_h < 8.f) return;
-        float radius = std::min(m_look.radius * m_h, std::min(m_w, m_h) * 0.46f);
-        auto color = accent();
-        if (m_look.surface > 0) {
-            float alpha = m_look.surface == 2 ? 0.39f : 0.25f;
-            auto edge = lerpC(color, {255, 255, 255}, 0.35f);
-            dnStrokeA(m_surfaceDetail, 1.1f, 1.1f, m_w - 1.1f, m_h - 1.1f,
-                      radius, edge, 0.62f, opacity * (alpha + 0.28f * p), 5);
-            if (m_look.surface != 3) {
-                float inset = std::clamp(radius + 3.f, 3.5f, m_w * 0.4f);
-                dnRound(m_surfaceDetail, inset, m_h - 3.4f, m_w - inset, m_h - 2.4f,
-                        0.5f, {255, 255, 255}, opacity * (0.15f + 0.07f * p), 3);
-            } else {
-                float rail = std::min(m_w * 0.24f, 11.f);
-                dnRect(m_surfaceDetail, 3.f, m_h - 4.f, 3.f + rail, m_h - 2.7f, edge, opacity * 0.76f);
-                dnRect(m_surfaceDetail, m_w - rail - 3.f, 2.7f, m_w - 3.f, 4.f, edge, opacity * 0.76f);
-            }
-        }
-        if (m_look.accentRail) {
-            float railW = std::clamp(m_w * 0.28f, 5.f, 28.f);
-            float cx = m_w * 0.5f;
-            dnRound(m_surfaceDetail, cx - railW / 2.f, 2.8f, cx + railW / 2.f, 3.9f,
-                    0.55f, color, opacity * (0.34f + 0.45f * p), 3);
-        }
-    }
-
-    void drawResponse(double now) {
-        bool held = m_preview ? m_previewDown : m_held != 0;
-        float age = m_strikeAt >= 0.0 ? static_cast<float>(now - m_strikeAt) : 1.f;
-        bool effect = m_look.glow && m_look.impact != 0 && m_look.impactStrength > 0.f && age >= 0.f && age < 0.36f;
-        float meter = 0.f;
-        if (m_look.statTile && m_look.statMeter) meter = m_activity;
-        else if (held && m_look.holdMeter && m_heldAt >= 0.0)
-            meter = std::clamp(static_cast<float>((now - m_heldAt) / 0.45), 0.f, 1.f);
-        if (!effect && !m_fxWasVisible && meter == m_lastMeter) return;
-        m_fxWasVisible = effect;
-        m_lastMeter = meter;
-        m_response->clear();
-        if (m_w < 10.f || m_h < 10.f) return;
-
-        auto color = accent();
-        if ((m_w - 6.f) * meter > 1.f) {
-            float right = 3.f + (m_w - 6.f) * meter;
-            dnRound(m_response, 3.f, 1.9f, right, 3.35f, 0.7f, color, 0.80f, 3);
-        }
-        if (!effect) return;
-        const float t = age / 0.36f;
-        float attenuation = (1.f - t) * (1.f - t) * m_look.impactStrength;
-        float expansion = 1.5f + t * 8.f;
-        const float radius = std::min(m_w, m_h) * m_look.radius;
-        if (m_look.impact == 2) {
-            dnStrokeA(m_response, -expansion, -expansion, m_w + expansion, m_h + expansion,
-                      radius + expansion * 0.5f, color, 0.85f, attenuation * 0.65f, 5);
-        } else if (m_look.impact == 3) {
-            for (int i = 0; i < 6; ++i) {
-                float angle = kPi * (0.25f + i / 3.f);
-                float x = m_w / 2.f + std::cos(angle) * (m_w * 0.48f + expansion);
-                float y = m_h / 2.f + std::sin(angle) * (m_h * 0.48f + expansion);
-                float size = 1.6f - t * 0.9f;
-                dnRound(m_response, x - size, y - size, x + size, y + size, size,
-                    lerpC(color, {255, 255, 255}, i % 2 ? 0.15f : 0.70f), attenuation, 3);
-            }
-        } else {
-            float start = 2.f + (m_w - 4.f) * t;
-            float finish = std::min(m_w - 2.f, start + m_w * 0.43f);
-            if (finish - start < 1.f) return;
-            dnRound(m_response, start, m_h - 3.2f, finish, m_h - 1.4f, 0.9f,
-                      lerpC(color, {255, 255, 255}, 0.6f), attenuation, 3);
-        }
     }
 
     // 눌림 정도에 따라 색과 투명도를 갱신 (이미지 색 입히기라 선이 생기지 않는다)
@@ -1313,17 +960,7 @@ protected:
 
         ccColor3B bottom = lerpC(m_look.tile, m_look.pressed, p);
         m_tile->setColor(bottom);
-        float opacity = idleA + (1.f - idleA) * p;
-        setOp(m_tile, opacity);
-        bool surfaced = m_look.surface == 1 || m_look.surface == 2;
-        m_sheen->setVisible(surfaced);
-        if (surfaced) {
-            m_sheen->setColor(lerpC(accent(), {255, 255, 255}, 0.54f));
-            float sheen = m_look.surface == 2 ? 0.24f : 0.12f;
-            setOp(m_sheen, opacity * (sheen + p * 0.07f));
-        }
-        drawSurface(p, opacity);
-        m_face->setScale(1.f - (m_look.statTile ? 0.f : m_look.keyTravel * p));
+        setOp(m_tile, idleA + (1.f - idleA) * p);
 
         if (m_look.gradTile && (m_look.idleGradient || p > 0.01f)) {
             m_tileGrad->setVisible(true);
@@ -1364,17 +1001,6 @@ public:
         return nullptr;
     }
 
-    void setPreview(bool down, double now) {
-        m_preview = true;
-        if (m_previewDown != down) {
-            m_previewDown = down;
-            if (down) m_strikeAt = m_heldAt = now;
-            else m_heldAt = -1.0;
-        }
-    }
-
-    void setActivity(float value) { m_activity = std::clamp(value, 0.f, 1.f); }
-
     void setStatValue(int value) {
         if (m_presses == value) return;
         m_presses = value;
@@ -1390,13 +1016,11 @@ public:
     }
 
     void layout(Look const& l, float w, float h) {
+        refreshGradient(l);
         m_look = l;
         m_w = w;
         m_h = h;
         this->setContentSize({m_w, m_h});
-        m_face->setContentSize({m_w, m_h});
-        m_face->setPosition({m_w / 2.f, m_h / 2.f});
-        m_lastMeter = -1.f;
 
         float r = std::min(std::max(l.radius * m_h, 2.f), m_h / 2.f);
         float s = std::clamp(r / kBaseR, 0.2f, std::max(0.2f, std::min(m_w, m_h) / kCap));
@@ -1404,19 +1028,19 @@ public:
             m_lw = m_w; m_lh = m_h; m_ls = s;
             fitSize(m_tile, m_w, m_h, s);
             fitSize(m_tileGrad, m_w, m_h, s);
-            fitSize(m_sheen, m_w, m_h, s);
             fitSize(m_glow, m_w + 2 * kGlowPad, m_h + 2 * kGlowPad, 1.f);
         }
         placeCenter(m_tile, 0.f, 0.f, m_w, m_h);
         placeCenter(m_tileGrad, 0.f, 0.f, m_w, m_h);
-        placeCenter(m_sheen, 0.f, 0.f, m_w, m_h);
         placeCenter(m_glow, -kGlowPad, -kGlowPad, m_w + 2 * kGlowPad, m_h + 2 * kGlowPad);
 
         setFont(m_name, l.labelFont, hasHangul(m_nameStr));
         setFont(m_count, l.countFont);
         for (auto border : m_countOutline) setFont(border, l.countFont);
-        m_name->setScale(labelScale(m_name, l.labelSize, m_w * 0.84f));
-        m_name->setPosition({m_w / 2, textCenterY(l, m_h)});
+        bool inlineStat = l.statTile && l.statSideBySide;
+        m_name->setAnchorPoint({inlineStat ? 0.f : 0.5f, 0.5f});
+        m_name->setScale(labelScale(m_name, l.labelSize, m_w * (inlineStat ? 0.52f : 0.84f)));
+        m_name->setPosition({inlineStat ? 6.f : m_w / 2.f, inlineStat ? m_h / 2.f : textCenterY(l, m_h)});
         this->fitCount();
 
         this->drawBorder();
@@ -1427,8 +1051,6 @@ public:
     void input(int source, bool down, double t, bool drawNotes) {
         const unsigned bit = 1u << source;
         if (down) {
-            if (!m_held) m_heldAt = t;
-            m_strikeAt = t;
             m_held |= bit;
             ++m_presses;
             m_countStart = t;
@@ -1443,7 +1065,6 @@ public:
             }
         } else if (m_held & bit) {
             m_held &= ~bit;
-            if (!m_held) m_heldAt = -1.0;
             for (auto it = m_notes.rbegin(); it != m_notes.rend(); ++it) {
                 if (it->source == source && it->end < 0) {
                     it->end = t;
@@ -1455,7 +1076,6 @@ public:
 
     void resetInput() {
         m_held = 0;
-        m_heldAt = m_strikeAt = -1.0;
         clearNotes();
     }
 
@@ -1510,22 +1130,23 @@ public:
             float yb = static_cast<float>((now - e) * sp);
             float len = holdNoteLength(n.start, e, sp, m_look.holdLengthScale, H - yb);
             if (yb >= H || len < 0.05f) {
-                s.base->setVisible(false);
-                s.solid->setVisible(false);
-                s.linear->setVisible(false);
-                s.head->setVisible(false);
-                s.grad->setVisible(false);
-                s.glow->setVisible(false);
+                s.hide();
                 continue;
             }
             float fade = std::pow(1.f - yb / H, std::max(0.f, m_look.noteFade));
             float sN = noteSpriteScale(noteR, nw, len);
             float py = baseY + yb;
+            bool applyGradient = m_look.gradNotes && m_gradientFrame;
+            if (applyGradient && n.gradientVersion != m_gradientVersion) {
+                useGradientFrame(s, m_gradientFrame);
+                n.gradientVersion = m_gradientVersion;
+                n.lw = -1.f;
+            }
             if (n.lw != nw || n.lh != len || n.ls != sN || n.lg != sg) {
                 n.lw = nw; n.lh = len; n.ls = sN; n.lg = sg;
                 sizeNote(s, nw, len, sN, sg);
             }
-            paintNote(s, m_noteBorder, m_look, x0, py, nw, len, sN, sg, fade);
+            paintNote(s, m_noteBorder, m_look, x0, py, nw, len, sN, sg, fade, applyGradient);
         }
     }
 
@@ -1537,18 +1158,16 @@ public:
             fitCount(now);
             if (now - m_countStart >= m_look.countMotionTime) m_countStart = -1.0;
         }
-        bool held = m_preview ? m_previewDown : m_held != 0;
-        float target = held ? 1.f : 0.f;
-        float rate = held ? 42.f : 19.f;
+        float target = m_held ? 1.f : 0.f;
+        float rate = m_held ? 40.f : 14.f;
         float old = m_press;
-        m_press += (target - m_press) * (1.f - std::exp(-std::max(0.f, dt) * rate));
+        m_press += (target - m_press) * std::min(1.f, dt * rate);
         if (std::abs(m_press - target) < 0.01f) m_press = target;
 
         if (m_press != old || m_dirty) {
             m_dirty = false;
             this->refreshTile();
         }
-        drawResponse(now);
         this->tickNotes(now);
     }
 };
@@ -1582,18 +1201,16 @@ static Look statLook(Look const& base, int metric) {
     auto border = static_cast<int>(std::clamp(statValue(metric, "rim", -1), -1., 16777215.));
     style.border = border;
     style.borderW = static_cast<float>(std::clamp(statValue(metric, "rim-width", 0), 0., 4.));
-    style.radius = static_cast<float>(std::clamp(statValue(metric, "roundness", 10), 0., 50.));
+    style.radius = static_cast<float>(std::clamp(statValue(metric, "roundness", 7), 0., 50.));
     Look result = lookForKey(base, style);
     result.timeline = false;
+    result.gradNotes = false;
     result.statTile = true;
-    result.statMeter = metric != TotalMetric && statValue(metric, "activity-meter", metric == KpsMetric) != 0;
-    result.accentRail = false;
-    result.accentJump = unpackC(static_cast<int>(std::clamp(statValue(metric, "accent", 0x66dfff), 0., 16777215.)));
+    result.statSideBySide = statValue(metric, "stat-inline", 1) != 0;
     result.counter = true;
     result.countArea = result.countDirection = 0;
     result.countAlign = 1;
     result.countGap = 2.f;
-    result.surface = static_cast<int>(std::clamp(statValue(metric, "surface", base.surface), 0., 3.));
     result.gradTile = result.idleGradient = statValue(metric, "idle-gradient", 0) != 0;
     return result;
 }
@@ -1758,6 +1375,11 @@ public:
 
     std::vector<StatBox> const& statGeo() const { return m_statGeo; }
 
+    StatBox const* statBox(int metric) const {
+        for (auto const& box : m_statGeo) if (box.metric == metric) return &box;
+        return nullptr;
+    }
+
     void layoutStats(float minX, float maxX, float minY, float maxY) {
         m_statGeo.clear();
         auto win = CCDirector::get()->getWinSize();
@@ -1768,25 +1390,22 @@ public:
         std::array<int, StatCount> anchors{};
         std::array<float, StatCount> widths{}, heights{};
         std::array<bool, StatCount> shown{};
-        float maxAutoWidth = 0.f;
         for (int i = 0; i < StatCount; ++i) {
-            bool baseVisible = i == TotalMetric ? m_look.total : m_look.kps;
+            bool baseVisible = i == TotalMetric ? m_look.total : i == KpsMetric && m_look.kps;
             shown[i] = m_stats[i] && statValue(i, "visible", baseVisible) != 0;
-            widths[i] = static_cast<float>(std::clamp(statValue(i, "width", 45), 24., 200.));
-            heights[i] = static_cast<float>(std::clamp(statValue(i, "height", 27), 18., 100.));
-            anchors[i] = static_cast<int>(std::clamp(statValue(i, "anchor", 0), 0., 4.));
-            if (shown[i] && anchors[i] == 0) maxAutoWidth = std::max(maxAutoWidth, widths[i]);
+            widths[i] = static_cast<float>(std::clamp(statValue(i, "width", 72), 24., 200.));
+            heights[i] = static_cast<float>(std::clamp(statValue(i, "height", 19), 12., 100.));
+            anchors[i] = static_cast<int>(std::clamp(statValue(i, "anchor", 0), 0., 5.));
         }
-        float rightSpace = win.width - origin.x - maxX;
-        float leftSpace = origin.x + minX;
-        int automatic = rightSpace >= maxAutoWidth + 5.f ? 1 : leftSpace >= maxAutoWidth + 5.f ? 2 :
-            (origin.y + minY >= win.height - origin.y - maxY ? 3 : 4);
+        float availableBelow = origin.y + minY;
+        int automatic = availableBelow >= 24.f ? 3 : 4;
         for (int i = 0; i < StatCount; ++i) {
             if (!shown[i]) continue;
             if (anchors[i] == 0) anchors[i] = automatic;
+            if (anchors[i] == 5) continue;
             extent[anchors[i] - 1] += (anchors[i] <= 2 ? heights[i] : widths[i]) + 3.f;
         }
-        for (int i = 0; i < StatCount; ++i) {
+        for (int i : {KpsMetric, TotalMetric, PeakMetric}) {
             auto lane = m_stats[i];
             if (!lane) continue;
             lane->setVisible(shown[i]);
@@ -1795,7 +1414,9 @@ public:
             float w = widths[i], h = heights[i];
             int anchor = anchors[i];
             float x, y;
-            if (anchor <= 2) {
+            if (anchor == 5) {
+                x = y = 0.f;
+            } else if (anchor <= 2) {
                 x = anchor == 1 ? maxX + 5.f : minX - w - 5.f;
                 x = std::clamp(origin.x + x, 0.f, std::max(0.f, win.width - w)) - origin.x;
                 float stack = std::clamp(origin.y + maxY, std::min(win.height, extent[anchor - 1]), win.height);
@@ -1808,8 +1429,8 @@ public:
                 y = std::clamp(origin.y + y, 0.f, std::max(0.f, win.height - h)) - origin.y;
                 distance[anchor - 1] += w + 3.f;
             }
-            float shiftX = static_cast<float>(std::clamp(statValue(i, "x", 0), -250., 250.));
-            float shiftY = static_cast<float>(std::clamp(statValue(i, "y", 0), -200., 200.));
+            float shiftX = static_cast<float>(std::clamp(statValue(i, "x", 0), -500., 500.));
+            float shiftY = static_cast<float>(std::clamp(statValue(i, "y", 0), -300., 300.));
             CCPoint pos{x + shiftX, y + shiftY};
             lane->setName(statName(i));
             int values[StatCount] = {m_total, static_cast<int>(m_hits.size()), m_peak};
@@ -1976,7 +1597,6 @@ public:
         for (auto const& box : m_statGeo) {
             auto lane = m_stats[box.metric];
             lane->setStatValue(values[box.metric]);
-            lane->setActivity(static_cast<float>(values[box.metric]) / std::max(16, m_peak));
             lane->tick(now, dt, 0.f);
         }
     }
@@ -1987,12 +1607,7 @@ public:
 // 왼쪽 캔버스: 키를 눌러 선택(파란 테두리), 끌어서 이동, 손잡이로 크기 조절
 // 오른쪽: 탭별 설정. 아래: 키 추가/삭제, 지도 배치 모드, 미리보기 등
 // ---------------------------------------------------------------
-static ccColor3B const kBlue = {101, 221, 255};
-static ccColor3B const kPanel = {19, 28, 46};
-static ccColor3B const kPanelRaised = {30, 44, 65};
-static ccColor3B const kPanelLine = {54, 81, 109};
-static ccColor3B const kActiveTile = {28, 87, 112};
-static ccColor3B const kPassiveText = {159, 178, 203};
+static ccColor3B const kBlue = {90, 140, 255};
 static ccColor3B const kWhite = {255, 255, 255};
 
 struct Ctl {
@@ -2053,6 +1668,8 @@ class EditorInputPopup : public geode::Popup {
     }
 
 public:
+    void focusInput() { if (m_field) m_field->focus(); }
+
     static bool captureKeyboardEvent(enumKeyCodes key, bool down, bool repeat) {
         const int code = static_cast<int>(key);
         if (s_skipRelease != 0 && code == s_skipRelease) {
@@ -2105,6 +1722,196 @@ public:
     }
 };
 
+static ccColor3B hsvColor(float hue, float saturation, float value) {
+    auto channel = [&](float offset) {
+        float phase = std::fmod(hue * 6.f + offset, 6.f);
+        float amount = value * (1.f - saturation * std::clamp(std::min(phase, 4.f - phase), 0.f, 1.f));
+        return static_cast<GLubyte>(std::lround(amount * 255.f));
+    };
+    return {channel(5.f), channel(3.f), channel(1.f)};
+}
+
+static std::array<float, 3> hsvFromColor(int rgb) {
+    auto color = unpackC(rgb);
+    float r = color.r / 255.f, g = color.g / 255.f, b = color.b / 255.f;
+    float max = std::max({r, g, b}), delta = max - std::min({r, g, b});
+    float hue = 0.f;
+    if (delta > 0.f) {
+        if (r == max) hue = (g - b) / delta;
+        else if (g == max) hue = 2.f + (b - r) / delta;
+        else hue = 4.f + (r - g) / delta;
+    }
+    return {std::fmod(hue + 6.f, 6.f) / 6.f, max == 0.f ? 0.f : delta / max, max};
+}
+
+static void drawChecker(CCDrawNode* draw, float x, float y, float w, float h, float cell) {
+    for (int iy = 0; iy * cell < h; ++iy) {
+        for (int ix = 0; ix * cell < w; ++ix) {
+            auto color = (ix + iy) % 2 ? ccColor3B{200, 205, 211} : ccColor3B{243, 246, 248};
+            dnRect(draw, x + ix * cell, y + iy * cell, x + std::min(w, (ix + 1) * cell),
+                   y + std::min(h, (iy + 1) * cell), color, 1.f);
+        }
+    }
+}
+
+static void drawRamp(CCDrawNode* draw, GradientStops const& stops, float x, float y, float w, float h) {
+    if (w <= 0 || h <= 0) return;
+    drawChecker(draw, x, y, w, h, 4.f);
+    constexpr int slices = 36;
+    for (int i = 0; i < slices; ++i) {
+        auto color = gradientAt(stops, (i + 0.5f) / slices);
+        dnRect(draw, x + w * i / slices, y, x + w * (i + 1) / slices, y + h,
+               unpackC(color.color), color.alpha / 255.f);
+    }
+}
+
+class VisualColorPopup : public geode::Popup {
+    GradientStops m_colors;
+    bool m_gradient = false;
+    bool m_light = true;
+    int m_stop = 0;
+    int m_drag = 0;
+    std::array<float, 3> m_hsv{};
+    CCDrawNode* m_paint = nullptr;
+    CCLabelBMFont* m_opacity = nullptr;
+    std::function<void(GradientStops const&)> m_apply;
+    std::function<void()> m_dismiss;
+
+    void refresh() {
+        m_paint->clear();
+        auto field = m_light ? ccColor3B{246, 248, 251} : ccColor3B{38, 44, 53};
+        auto mark = m_light ? ccColor3B{91, 83, 168} : ccColor3B{175, 166, 246};
+        auto cursor = [&](float x, float y, float radius) {
+            dnRound(m_paint, x - radius, y - radius, x + radius, y + radius, radius, kWhite, 1.f, 5);
+            dnStrokeA(m_paint, x - radius, y - radius, x + radius, y + radius, radius, mark, 0.85f, 1.f, 5);
+        };
+        if (m_gradient) {
+            drawRamp(m_paint, m_colors, 22.f, 181.f, 176.f, 12.f);
+            cursor(m_stop == 0 ? 22.f : 198.f, 187.f, 4.5f);
+        } else {
+            dnRound(m_paint, 22.f, 180.f, 198.f, 193.f, 3.f, unpackC(m_colors[0].color), 1.f);
+        }
+        for (int y = 0; y < 18; ++y) {
+            for (int x = 0; x < 24; ++x) {
+                auto color = hsvColor(m_hsv[0], x / 23.f, y / 17.f);
+                dnRect(m_paint, 22.f + 176.f * x / 24, 79.f + 92.f * y / 18,
+                       22.f + 176.f * (x + 1) / 24, 79.f + 92.f * (y + 1) / 18, color, 1.f);
+            }
+        }
+        cursor(22.f + m_hsv[1] * 176.f, 79.f + m_hsv[2] * 92.f, 3.6f);
+        for (int i = 0; i < 36; ++i) {
+            dnRect(m_paint, 22.f + 176.f * i / 36, 60.f, 22.f + 176.f * (i + 1) / 36,
+                   69.f, hsvColor(i / 36.f, 1.f, 1.f), 1.f);
+        }
+        cursor(22.f + m_hsv[0] * 176.f, 64.5f, 3.7f);
+        if (m_gradient) {
+            auto color = m_colors[m_stop].color;
+            drawRamp(m_paint, {{{color, 0}, {color, 255}}}, 22.f, 42.f, 176.f, 9.f);
+            cursor(22.f + 176.f * m_colors[m_stop].alpha / 255.f, 46.5f, 3.7f);
+            auto percent = std::to_string(std::lround(m_colors[m_stop].alpha * 100.f / 255.f)) + "%";
+            if (m_opacity) m_opacity->setString(percent.c_str());
+        }
+        dnRound(m_paint, 131.f, 10.f, 199.f, 32.f, 4.f, field, 1.f);
+    }
+
+    void updateColor(CCPoint point) {
+        float t = std::clamp((point.x - 22.f) / 176.f, 0.f, 1.f);
+        if (m_drag == 1) {
+            m_hsv[1] = t;
+            m_hsv[2] = std::clamp((point.y - 79.f) / 92.f, 0.f, 1.f);
+        } else if (m_drag == 2) {
+            m_hsv[0] = t;
+        } else if (m_drag == 3) {
+            m_colors[m_stop].alpha = static_cast<int>(std::lround(t * 255.f));
+        }
+        if (m_drag == 1 || m_drag == 2) m_colors[m_stop].color = packC(hsvColor(m_hsv[0], m_hsv[1], m_hsv[2]));
+        refresh();
+    }
+
+    void onClose(CCObject* sender) override {
+        if (m_dismiss) {
+            auto dismiss = std::move(m_dismiss);
+            dismiss();
+        }
+        Popup::onClose(sender);
+    }
+
+public:
+    static VisualColorPopup* create(GradientStops stops, bool gradient, bool light,
+        std::function<void(GradientStops const&)> apply, std::function<void()> dismiss) {
+        auto popup = new VisualColorPopup;
+        if (!popup->Popup::init(220.f, 226.f)) {
+            delete popup;
+            return nullptr;
+        }
+        popup->m_colors = stops;
+        popup->m_gradient = gradient;
+        popup->m_light = light;
+        popup->m_hsv = hsvFromColor(stops[0].color);
+        popup->m_apply = std::move(apply);
+        popup->m_dismiss = std::move(dismiss);
+        popup->m_paint = CCDrawNode::create();
+        auto background = CCDrawNode::create();
+        dnRound(background, 8.f, 5.f, 212.f, 220.f, 9.f,
+                light ? ccColor3B{230, 235, 241} : ccColor3B{27, 33, 40}, 1.f, 6);
+        popup->m_mainLayer->addChild(background, 1);
+        popup->m_mainLayer->addChild(popup->m_paint, 2);
+        auto text = light ? ccColor3B{41, 48, 55} : kWhite;
+        auto title = mkLabel(popup->m_mainLayer, gradient ? "Note gradient" : "Choose color",
+                            0.40f, text, {110.f, 208.f}, 0.5f);
+        if (title) title->setZOrder(3);
+        if (gradient) {
+            auto start = mkLabel(popup->m_mainLayer, "Bottom", 0.23f, text, {22.f, 175.f}, 0.f);
+            auto tip = mkLabel(popup->m_mainLayer, "Fading tip", 0.23f, text, {198.f, 175.f}, 1.f);
+            if (start) start->setZOrder(3);
+            if (tip) tip->setZOrder(3);
+            popup->m_opacity = mkLabel(popup->m_mainLayer, "", 0.29f, text, {24.f, 21.f}, 0.f);
+            if (popup->m_opacity) popup->m_opacity->setZOrder(3);
+        }
+        auto save = mkLabel(popup->m_mainLayer, "Apply color", 0.29f, text, {165.f, 21.f}, 0.5f);
+        if (save) save->setZOrder(3);
+        if (popup->m_closeBtn) popup->m_closeBtn->setZOrder(4);
+        if (popup->m_buttonMenu) popup->m_buttonMenu->setZOrder(4);
+        popup->refresh();
+        popup->autorelease();
+        return popup;
+    }
+
+    bool ccTouchBegan(CCTouch* touch, CCEvent* event) override {
+        auto p = m_mainLayer->convertTouchToNodeSpace(touch);
+        if (m_gradient && CCRect(16.f, 177.f, 188.f, 21.f).containsPoint(p)) {
+            m_stop = p.x < 110.f ? 0 : 1;
+            m_hsv = hsvFromColor(m_colors[m_stop].color);
+            refresh();
+            return true;
+        }
+        if (CCRect(131.f, 10.f, 68.f, 22.f).containsPoint(p)) {
+            m_drag = 4;
+            return true;
+        }
+        if (CCRect(16.f, 75.f, 188.f, 99.f).containsPoint(p)) m_drag = 1;
+        else if (CCRect(16.f, 56.f, 188.f, 17.f).containsPoint(p)) m_drag = 2;
+        else if (m_gradient && CCRect(16.f, 38.f, 188.f, 17.f).containsPoint(p)) m_drag = 3;
+        else return Popup::ccTouchBegan(touch, event);
+        updateColor(p);
+        return true;
+    }
+
+    void ccTouchMoved(CCTouch* touch, CCEvent*) override {
+        if (m_drag > 0 && m_drag < 4) updateColor(m_mainLayer->convertTouchToNodeSpace(touch));
+    }
+    void ccTouchEnded(CCTouch* touch, CCEvent*) override {
+        bool confirm = m_drag == 4 &&
+            CCRect(131.f, 10.f, 68.f, 22.f).containsPoint(m_mainLayer->convertTouchToNodeSpace(touch));
+        m_drag = 0;
+        if (confirm) {
+            m_apply(m_colors);
+            onClose(nullptr);
+        }
+    }
+    void ccTouchCancelled(CCTouch*, CCEvent*) override { m_drag = 0; }
+};
+
 class KVEditor : public CCLayer {
 protected:
     KeyViewer* m_viewer = nullptr;
@@ -2124,8 +1931,9 @@ protected:
     bool m_mapMode = false;
     bool m_pendingRebuild = false;
     bool m_modal = false;
+    bool m_light = true;
+    int m_dragStat = -1;
     int m_statTab = 0;
-    std::map<int, std::string> m_undoPreset;
 
     CCDrawNode* m_back = nullptr;
     CCDrawNode* m_chrome = nullptr;
@@ -2137,9 +1945,8 @@ protected:
     CCNode* m_winLabels = nullptr;
     CCNode* m_mapLabels = nullptr;
     CCLabelBMFont* m_status = nullptr;
-    CCLabelBMFont* m_tabLabels[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
-    std::map<int, KeyLane*> m_previewTiles;
-    CCNode* m_previewTileRoot = nullptr;
+    CCLabelBMFont* m_tabLabels[4] = {};
+    std::vector<CCLabelBMFont*> m_tileLabels;
     CCNode* m_counterPreview = nullptr;
     CCNode* m_notePreview = nullptr;
     std::vector<Btn> m_btns, m_mapBtns;
@@ -2159,9 +1966,17 @@ protected:
     static constexpr float kSc = 1.4f;
     View m_fit;
 
+    ccColor3B uiInk() const { return m_light ? ccColor3B{40, 48, 56} : ccColor3B{234, 237, 240}; }
+    ccColor3B uiMuted() const { return m_light ? ccColor3B{88, 97, 108} : ccColor3B{171, 179, 188}; }
+    ccColor3B uiAccent() const { return m_light ? ccColor3B{83, 99, 181} : ccColor3B{151, 162, 239}; }
+    ccColor3B uiField() const { return m_light ? ccColor3B{250, 251, 252} : ccColor3B{34, 40, 47}; }
+    ccColor3B uiLine() const { return m_light ? ccColor3B{175, 186, 197} : ccColor3B{79, 89, 102}; }
+    ccColor3B uiPanel() const { return m_light ? ccColor3B{246, 247, 249} : ccColor3B{29, 34, 39}; }
+
     bool init(KeyViewer* viewer) {
         if (!CCLayer::init()) return false;
         m_viewer = viewer;
+        m_light = Mod::get()->getSettingValue<std::string>("editor-theme") != "Dark";
         this->setTouchEnabled(true);
         this->setMouseEnabled(true);
 
@@ -2186,15 +2001,13 @@ protected:
         m_chrome = CCDrawNode::create();
         this->addChild(m_chrome, 1);
         m_canvas = CCDrawNode::create();
-        this->addChild(m_canvas, 3);
+        this->addChild(m_canvas, 2);
         m_canvasLabels = CCNode::create();
-        this->addChild(m_canvasLabels, 2);
-        m_previewTileRoot = CCNode::create();
+        this->addChild(m_canvasLabels, 3);
         m_notePreview = CCNode::create();
         m_canvasLabels->addChild(m_notePreview);
-        m_canvasLabels->addChild(m_previewTileRoot, 1);
         m_counterPreview = CCNode::create();
-        m_canvasLabels->addChild(m_counterPreview, 2);
+        m_canvasLabels->addChild(m_counterPreview);
         auto clip = CCClippingNode::create();
         auto stencil = CCDrawNode::create();
         dnRect(stencil, inX0, vpY0, inX1, vpY1, {255, 255, 255}, 1.f);
@@ -2213,8 +2026,16 @@ protected:
         this->addChild(m_mapLabels, 8);
 
         // 제목과 닫기
-        mkLabel(m_winLabels, "KEY VIEWER", 0.46f, kWhite, CCPoint(winX0 + 36.f, winY1 - 16.f), 0.f);
-        mkLabel(m_winLabels, "X", 0.45f, ccColor3B{230, 230, 240}, CCPoint(winX1 - 22.f, winY1 - 16.f), 0.5f);
+        mkLabel(m_winLabels, "KEY VIEWER", 0.40f, uiInk(), CCPoint(winX0 + 14.f, winY1 - 16.f), 0.f);
+        mkLabel(m_winLabels, m_light ? "Dark mode" : "Light mode", 0.26f, uiInk(),
+                CCPoint(winX1 - 72.f, winY1 - 16.f), 0.5f);
+        {
+            Ctl theme;
+            theme.r = CCRect(winX1 - 111.f, winY1 - 27.f, 78.f, 22.f);
+            theme.down = [this](CCPoint) { changeTheme(!m_light); };
+            m_fixed.push_back(theme);
+        }
+        mkLabel(m_winLabels, "X", 0.40f, uiInk(), CCPoint(winX1 - 22.f, winY1 - 16.f), 0.5f);
         {
             Ctl c;
             c.r = CCRect(winX1 - 40.f, winY1 - 32.f, 34.f, 30.f);
@@ -2222,13 +2043,13 @@ protected:
             m_fixed.push_back(c);
         }
         m_status = mkLabel(m_winLabels, "Tap a key to select it. Drag it to move, drag the handles to resize.",
-                           0.26f, ccColor3B{130, 130, 150}, CCPoint(cvX0 + 8.f, cvY0 + 8.f), 0.f);
+                           0.24f, uiMuted(), CCPoint(cvX0 + 8.f, cvY0 + 8.f), 0.f);
 
         // 탭
         {
-            char const* names[5] = {"KEY", "NOTE", "COUNT", "VIEW", "SETS"};
-            float tw = (inX1 - inX0 - 12.f) / 5.f;
-            for (int i = 0; i < 5; i++) {
+            char const* names[4] = {"KEY", "NOTE", "COUNT", "VIEW"};
+            float tw = (inX1 - inX0 - 12.f) / 4.f;
+            for (int i = 0; i < 4; i++) {
                 float x0 = inX0 + 6.f + i * tw;
                 m_tabLabels[i] = mkLabel(m_winLabels, names[i], 0.28f, kWhite,
                                          CCPoint(x0 + tw / 2.f, (tabY0 + inY1 - 2.f) / 2.f), 0.5f);
@@ -2267,7 +2088,7 @@ protected:
                 b.y1 = tbY1;
                 m_btns.push_back(b);
 
-                auto lab = mkLabel(m_winLabels, b.label, 0.30f, kWhite,
+                auto lab = mkLabel(m_winLabels, b.label, 0.30f, uiInk(),
                                    CCPoint((b.x0 + b.x1) / 2.f, (b.y0 + b.y1) / 2.f), 0.5f);
                 if (lab) {
                     float lw = lab->getContentSize().width * 0.30f;
@@ -2380,7 +2201,7 @@ protected:
             minY = std::min(minY, g.y);
             maxY = std::max(maxY, g.y + g.h);
         }
-        if (m_tab == 2 || m_tab == 4) {
+        {
             for (auto const& box : m_viewer->statGeo()) {
                 minX = std::min(minX, box.position.x);
                 maxX = std::max(maxX, box.position.x + box.width);
@@ -2398,6 +2219,14 @@ protected:
     LaneGeo const* geoById(int id) const {
         for (auto const& g : m_viewer->geo()) if (g.id == id) return &g;
         return nullptr;
+    }
+
+    CCLabelBMFont* tileLabel(int i) {
+        while (static_cast<int>(m_tileLabels.size()) <= i) {
+            auto l = mkLabel(m_canvasLabels, "", 0.5f, kWhite, CCPoint(0.f, 0.f), 0.5f);
+            m_tileLabels.push_back(l);
+        }
+        return m_tileLabels[i];
     }
 
     void setStatus(std::string const& s) {
@@ -2486,6 +2315,11 @@ protected:
     }
 
     void deleteKey() {
+        if (m_tab == 2 && m_statTab > 0) {
+            updateStat(m_statTab - 1, "visible", 0);
+            m_pendingRebuild = true;
+            return;
+        }
         if (g_keys.size() <= 1) {
             this->setStatus("Keep at least one key.");
             return;
@@ -2506,6 +2340,19 @@ protected:
     }
 
     void resetKey() {
+        if (m_tab == 2 && m_statTab > 0) {
+            int metric = m_statTab - 1;
+            auto& settings = g_statSettings[metric];
+            for (auto it = settings.begin(); it != settings.end();) {
+                if (it->first == "visible" || it->first == "x" || it->first == "y" || it->first == "anchor" ||
+                    it->first == "width" || it->first == "height" || it->first == "language") ++it;
+                else it = settings.erase(it);
+            }
+            saveStat(metric);
+            refreshAll();
+            m_pendingRebuild = true;
+            return;
+        }
         auto k = keyById(m_sel);
         if (!k) return;
         KeyDef d;
@@ -2551,61 +2398,93 @@ protected:
     }
 
     // ---------- 그리기 ----------
-    void redrawBack() {
-        m_back->clear();
-        dnRect(m_back, 0.f, 0.f, W, H, {4, 7, 16}, m_mapMode ? 0.20f : 0.79f);
+    void changeTheme(bool light) {
+        Mod::get()->setSettingValue<std::string>("editor-theme", light ? "Light" : "Dark");
+        (void)Mod::get()->saveData();
+        m_reloadLanguage = true;
     }
 
-    void drawChromeButton(CCDrawNode* node, Btn const& b) {
-        bool active = btnActive(b);
-        dnRound(node, b.x0, b.y0, b.x1, b.y1, 6.f, active ? kActiveTile : kPanelRaised, 0.98f, 4);
-        dnStrokeA(node, b.x0 + 0.5f, b.y0 + 0.5f, b.x1 - 0.5f, b.y1 - 0.5f, 5.f, active ? kBlue : kPanelLine,
-                  0.65f, active ? 0.87f : 0.68f, 4);
+    void redrawBack() {
+        m_back->clear();
+        // 지도 모드에서는 게임 화면이 은은하게 비쳐 보이도록 어둡게만 덮는다
+        dnRect(m_back, 0.f, 0.f, W, H, ccColor3B{0, 0, 0}, m_mapMode ? 0.30f : 0.72f);
     }
 
     void redrawMapBar() {
         m_mapChrome->clear();
-        for (auto const& b : m_mapBtns) drawChromeButton(m_mapChrome, b);
+        for (auto const& b : m_mapBtns) {
+            bool on = this->btnActive(b);
+            dnRound(m_mapChrome, b.x0, b.y0, b.x1, b.y1, 6.f,
+                    on ? ccColor3B{70, 110, 240} : ccColor3B{40, 40, 52}, 0.92f, 4);
+        }
     }
 
     void redrawChrome() {
         m_chrome->clear();
-        dnRound(m_chrome, winX0 + 2.f, winY0 - 2.f, winX1 + 2.f, winY1 - 2.f, 13.f, {0, 0, 0}, 0.52f, 5);
-        dnRound(m_chrome, winX0, winY0, winX1, winY1, 12.f, {10, 16, 29}, 1.f, 5);
-        dnStrokeA(m_chrome, winX0 + 1.f, winY0 + 1.f, winX1 - 1.f, winY1 - 1.f, 12.f,
-                  kPanelLine, 0.8f, 0.88f, 5);
+        auto frame = m_light ? ccColor3B{224, 230, 236} : ccColor3B{40, 47, 54};
+        auto canvas = m_light ? ccColor3B{222, 229, 235} : ccColor3B{20, 25, 30};
+        auto grid = m_light ? ccColor3B{104, 119, 138} : ccColor3B{102, 116, 131};
+        auto active = lerpC(uiField(), uiAccent(), m_light ? 0.16f : 0.33f);
+        dnRound(m_chrome, winX0, winY0, winX1, winY1, 8.f, frame, 1.f);
+        dnStrokeA(m_chrome, winX0 + 0.5f, winY0 + 0.5f, winX1 - 0.5f, winY1 - 0.5f,
+                  7.5f, uiLine(), 0.75f, 0.79f);
+        dnRect(m_chrome, winX0 + 6.f, winY1 - 31.5f, winX1 - 6.f, winY1 - 31.f, uiLine(), 0.78f);
+        dnRound(m_chrome, winX1 - 110.f, winY1 - 25.f, winX1 - 35.f, winY1 - 7.f, 5.f, uiField());
+        dnRound(m_chrome, winX1 - 31.f, winY1 - 25.f, winX1 - 13.f, winY1 - 7.f, 5.f, uiField());
 
-        float cy = winY1 - 15.5f;
-        float cx = winX0 + 20.f;
-        CCPoint badge[] = {{cx - 9.f, cy - 8.f}, {cx + 9.f, cy + 8.f}, {cx + 4.f, cy + 8.f}, {cx - 12.f, cy - 8.f}};
-        auto blue = premulC(kBlue, 0.94f);
-        m_chrome->drawPolygon(badge, 4, blue, 0.f, blue);
-        dnRect(m_chrome, winX0 + 12.f, winY1 - 31.f, winX1 - 12.f, winY1 - 30.3f, kPanelLine, 0.85f);
-        dnRound(m_chrome, winX1 - 33.f, winY1 - 25.f, winX1 - 11.f, winY1 - 7.f, 5.f, kPanelRaised, 1.f, 4);
-
-        dnRound(m_chrome, cvX0, cvY0, cvX1, cvY1, 8.f, {7, 13, 24}, 1.f, 5);
-        dnStrokeA(m_chrome, cvX0 + 0.5f, cvY0 + 0.5f, cvX1 - 0.5f, cvY1 - 0.5f,
-                  7.f, kPanelLine, 0.65f, 0.78f, 4);
-        for (float x = cvX0 + 12.f; x < cvX1 - 8.f; x += 16.f) {
-            for (float y = cvY0 + 19.f; y < cvY1 - 8.f; y += 16.f)
-                dnRect(m_chrome, x, y, x + 0.75f, y + 0.75f, kBlue, 0.22f);
+        dnRound(m_chrome, cvX0, cvY0, cvX1, cvY1, 5.f, canvas, 1.f);
+        for (int i = 1; cvX0 + i * 6.f < cvX1 - 2.f; ++i) {
+            float x = cvX0 + i * 6.f;
+            dnRect(m_chrome, x, cvY0 + 2.f, x + 0.4f, cvY1 - 2.f, grid, i % 5 == 0 ? 0.28f : 0.12f);
         }
-        dnRound(m_chrome, cvX0 + 2.f, cvY0 + 2.f, cvX1 - 2.f, cvY0 + 15.f, 4.f, kPanel, 1.f, 4);
-
-        dnRound(m_chrome, inX0, inY0, inX1, inY1, 8.f, kPanel, 1.f, 5);
-        dnStrokeA(m_chrome, inX0 + 0.5f, inY0 + 0.5f, inX1 - 0.5f, inY1 - 0.5f,
-                  7.f, kPanelLine, 0.65f, 0.77f, 4);
-        float tw = (inX1 - inX0 - 12.f) / 5.f;
-        for (int i = 0; i < 5; ++i) {
+        for (int i = 1; cvY0 + i * 6.f < cvY1 - 2.f; ++i) {
+            float y = cvY0 + i * 6.f;
+            dnRect(m_chrome, cvX0 + 2.f, y, cvX1 - 2.f, y + 0.4f, grid, i % 5 == 0 ? 0.28f : 0.12f);
+        }
+        dnRound(m_chrome, cvX0 + 2.f, cvY0 + 2.f, cvX1 - 2.f, cvY0 + 14.f, 3.f, uiPanel(), 0.95f);
+        dnRound(m_chrome, inX0, inY0, inX1, inY1, 6.f, uiPanel(), 1.f);
+        float tw = (inX1 - inX0 - 12.f) / 4.f;
+        for (int i = 0; i < 4; ++i) {
             float x = inX0 + 6.f + i * tw;
-            bool active = i == m_tab;
             dnRound(m_chrome, x + 1.f, tabY0, x + tw - 1.f, inY1 - 3.f, 5.f,
-                    active ? kActiveTile : kPanelRaised, 1.f, 3);
-            if (active) dnRound(m_chrome, x + 5.f, tabY0 + 0.8f, x + tw - 5.f,
-                               tabY0 + 2.f, 0.6f, kBlue, 0.95f, 3);
-            if (m_tabLabels[i]) m_tabLabels[i]->setColor(active ? kWhite : kPassiveText);
+                    i == m_tab ? active : uiField(), 1.f, 4);
+            if (m_tabLabels[i]) m_tabLabels[i]->setColor(i == m_tab ? uiInk() : uiMuted());
         }
-        for (auto const& b : m_btns) drawChromeButton(m_chrome, b);
+
+        for (auto const& b : m_btns) {
+            bool on = btnActive(b);
+            dnRound(m_chrome, b.x0, b.y0, b.x1, b.y1, 6.f, on ? active : uiField(), 1.f, 4);
+            if (on) dnStrokeA(m_chrome, b.x0 + 0.5f, b.y0 + 0.5f, b.x1 - 0.5f, b.y1 - 0.5f,
+                              5.5f, uiAccent(), 0.8f, 0.63f, 4);
+        }
+    }
+
+    void drawCounterPreview(Look const& look, float x, float y, float w, float h, float zoom, ccColor3B fill) {
+        if (!look.counter || (!look.countFill && look.countOutline <= 0.f)) return;
+        auto sample = CCLabelBMFont::create("12", kFonts[look.countFont]);
+        if (!sample) return;
+        float scale = labelScale(sample, look.countSize, look.countArea == 1 ? 400.f : w * 0.84f);
+        auto dimensions = sample->getContentSize();
+        auto offset = counterPosition(look, w, h, dimensions.width * scale, dimensions.height * scale);
+        CCPoint pos{x + offset.x * zoom, y + offset.y * zoom};
+        if (look.countOutline > 0.f) {
+            for (int i = 0; i < 8; ++i) {
+                auto outline = CCLabelBMFont::create("12", kFonts[look.countFont]);
+                if (!outline) continue;
+                float angle = i * kPi / 4;
+                float radius = look.countOutline * zoom;
+                outline->setPosition({pos.x + std::cos(angle) * radius, pos.y + std::sin(angle) * radius});
+                outline->setScale(scale * zoom);
+                outline->setColor(look.countOutlineColor);
+                m_counterPreview->addChild(outline);
+            }
+        }
+        if (!look.countFill) return;
+        sample->setPosition(pos);
+        sample->setScale(scale * zoom);
+        ccColor3B autoColor = look.countArea == 0 ? lerpC(textFor(fill), fill, 0.45f) : kWhite;
+        sample->setColor(look.countColor < 0 ? autoColor : unpackC(look.countColor));
+        m_counterPreview->addChild(sample, 1);
     }
 
     void drawNotePreview(Look const& look, float x, float y, float width, float zoom) {
@@ -2618,6 +2497,7 @@ protected:
         sample->setScale(zoom);
         sample->setPosition({x, y});
         m_notePreview->addChild(sample);
+        auto frame = look.gradNotes ? makeGradientFrame(look.noteGradient) : nullptr;
         float bottom = 0.f;
         for (double hold : {0.075, 0.032, 0.017}) {
             float h = holdNoteLength(0.0, hold, look.noteSpeed, look.holdLengthScale, look.noteHeight - bottom);
@@ -2625,9 +2505,10 @@ protected:
             float rounding = noteSpriteScale(radius, w, h);
             auto sprites = createNoteSprites(sample);
             if (!sprites.base) break;
+            useGradientFrame(sprites, frame);
             sizeNote(sprites, w, h, rounding, glow);
             float fade = std::pow(1.f - bottom / look.noteHeight, std::max(0.f, look.noteFade));
-            paintNote(sprites, border, look, (width - w) / 2.f, look.noteBaseGap + bottom, w, h, rounding, glow, fade);
+            paintNote(sprites, border, look, (width - w) / 2.f, look.noteBaseGap + bottom, w, h, rounding, glow, fade, frame != nullptr);
             bottom += h + 7.f;
         }
     }
@@ -2637,7 +2518,7 @@ protected:
         m_counterPreview->removeAllChildrenWithCleanup(true);
         m_notePreview->removeAllChildrenWithCleanup(true);
         if (!m_mapMode && m_dragMode == 0) updateFit();
-        if (!m_mapMode && (m_tab == 2 || m_tab == 4)) {
+        if (!m_mapMode || !m_viewer->isVisible()) {
             auto v = this->view();
             auto base = readLook();
             int samples[StatCount] = {1324, 12, 18};
@@ -2646,35 +2527,33 @@ protected:
                 if (!box) continue;
                 box->layout(statLook(base, stat.metric), stat.width, stat.height);
                 box->setStatValue(samples[stat.metric]);
-                box->setActivity(stat.metric == KpsMetric ? 0.62f : 1.f);
                 box->tick(nowSec(), 0.f, 0.f);
                 CCPoint pos{v.ox + stat.position.x * v.sc, v.oy + stat.position.y * v.sc};
                 box->setPosition(pos);
                 if (m_tab == 2 && m_statTab == stat.metric + 1) {
                     auto outline = CCDrawNode::create();
                     float x = pos.x, y = pos.y, width = stat.width * v.sc, height = stat.height * v.sc;
-                    dnStroke(outline, x - 2, y - 2, x + width + 2, y + height + 2, 4.f, kBlue, 1.4f, 4);
+                    drawSelection(outline, x, y, x + width, y + height, 3.f);
                     m_counterPreview->addChild(outline, 2);
                 }
                 box->setScale(v.sc);
                 m_counterPreview->addChild(box);
             }
         }
-        for (auto it = m_previewTiles.begin(); it != m_previewTiles.end();) {
-            if (!keyById(it->first)) {
-                it->second->removeFromParentAndCleanup(true);
-                it = m_previewTiles.erase(it);
-            } else {
-                it->second->setVisible(false);
-                ++it;
+        if (m_mapMode && m_viewer->isVisible() && m_tab == 2 && m_statTab > 0) {
+            if (auto box = m_viewer->statBox(m_statTab - 1)) {
+                auto v = this->view();
+                float x = v.ox + box->position.x, y = v.oy + box->position.y;
+                drawSelection(m_canvas, x, y, x + box->width, y + box->height, 3.f);
             }
         }
-        bool drawPreviewTiles = !m_mapMode || !m_viewer->isVisible() || m_previewPressed;
-        auto now = nowSec();
+        for (auto l : m_tileLabels) if (l) l->setVisible(false);
 
         Look base = readLook();
         View v = this->view();
         auto const& geo = m_viewer->geo();
+        int li = 0;
+
         for (auto const& g : geo) {
             auto kd = keyById(g.id);
             if (!kd) continue;
@@ -2686,42 +2565,28 @@ protected:
 
             if (!m_mapMode && kl.timeline && g.id == m_sel) drawNotePreview(kl, x0, y1, g.w, v.sc);
 
-            if (drawPreviewTiles) {
-                KeyLane* tile = nullptr;
-                if (auto it = m_previewTiles.find(g.id); it != m_previewTiles.end()) tile = it->second;
-                else if ((tile = KeyLane::create(g.name))) {
-                    m_previewTiles.emplace(g.id, tile);
-                    m_previewTileRoot->addChild(tile);
-                }
-                if (tile) {
-                    tile->setName(g.name);
-                    tile->layout(kl, g.w, g.h);
-                    tile->setStatValue(12);
-                    tile->setScale(v.sc);
-                    tile->setPosition({x0, y0});
-                    tile->setVisible(true);
-                    tile->setPreview(m_previewPressed, now);
-                    tile->tick(now, 0.f, 0.f);
-                }
-            }
+            bool pressed = m_previewPressed;
+            ccColor3B fill = pressed ? kl.pressed : kl.tile;
+            float a = pressed ? 1.f : std::max(0.55f, kl.tileOpacity / 255.f);
+            dnRound(m_canvas, x0, y0, x1, y1, r, fill, a, 5);
+            if (kl.borderW > 0.f) dnStroke(m_canvas, x0, y0, x1, y1, r, kl.border, kl.borderW * v.sc, 5);
 
             // 선택한 키: 파란 테두리와 손잡이 (모서리 동그라미, 변 알약)
-            if (g.id == m_sel) {
-                dnStroke(m_canvas, x0, y0, x1, y1, r, kBlue, 1.6f, 5);
-                if (!m_mapMode) {
-                    float cx = (x0 + x1) / 2.f, cy = (y0 + y1) / 2.f;
-                    CCPoint corners[4] = {{x0, y0}, {x1, y0}, {x0, y1}, {x1, y1}};
-                    for (auto const& c : corners) {
-                        dnRound(m_canvas, c.x - 4.f, c.y - 4.f, c.x + 4.f, c.y + 4.f, 4.f, kWhite, 1.f, 3);
-                    }
-                    dnRound(m_canvas, cx - 7.f, y0 - 2.5f, cx + 7.f, y0 + 2.5f, 2.5f, kWhite, 1.f, 3);
-                    dnRound(m_canvas, cx - 7.f, y1 - 2.5f, cx + 7.f, y1 + 2.5f, 2.5f, kWhite, 1.f, 3);
-                    dnRound(m_canvas, x0 - 2.5f, cy - 7.f, x0 + 2.5f, cy + 7.f, 2.5f, kWhite, 1.f, 3);
-                    dnRound(m_canvas, x1 - 2.5f, cy - 7.f, x1 + 2.5f, cy + 7.f, 2.5f, kWhite, 1.f, 3);
-                }
+            if (g.id == m_sel && !(m_tab == 2 && m_statTab > 0)) drawSelection(m_canvas, x0, y0, x1, y1, r);
+
+            auto lab = this->tileLabel(li++);
+            if (lab) {
+                setFont(lab, kl.labelFont, hasHangul(g.name));
+                lab->setString(g.name.c_str());
+                float sc = labelScale(lab, kl.labelSize * v.sc, w * 0.84f);
+                lab->setScale(sc);
+                float lw = lab->getContentSize().width * sc;
+                if (lw > w * 0.84f && lw > 0.f) lab->setScale(sc * w * 0.84f / lw);
+                lab->setColor(kl.labelColor < 0 ? textFor(fill) : unpackC(kl.labelColor));
+                lab->setPosition({(x0 + x1) / 2.f, y0 + textCenterY(kl, h)});
+                lab->setVisible(true);
             }
-
-
+            if (!m_mapMode && g.id == m_sel) drawCounterPreview(kl, x0, y0, g.w, g.h, v.sc, fill);
         }
     }
 
@@ -2742,23 +2607,54 @@ protected:
         return bi;
     }
 
+    void drawSelection(CCDrawNode* draw, float x0, float y0, float x1, float y1, float radius) {
+        dnStroke(draw, x0 - 1.f, y0 - 1.f, x1 + 1.f, y1 + 1.f, radius, uiAccent(), 1.f, 5);
+        if (m_mapMode) return;
+        float cx = (x0 + x1) / 2.f, cy = (y0 + y1) / 2.f;
+        for (auto point : {CCPoint{x0, y0}, CCPoint{x1, y0}, CCPoint{x0, y1}, CCPoint{x1, y1},
+                           CCPoint{cx, y0}, CCPoint{cx, y1}, CCPoint{x0, cy}, CCPoint{x1, cy}}) {
+            dnRound(draw, point.x - 3.4f, point.y - 3.4f, point.x + 3.4f, point.y + 3.4f,
+                    2.5f, kWhite, 1.f, 4);
+            dnStrokeA(draw, point.x - 3.4f, point.y - 3.4f, point.x + 3.4f, point.y + 3.4f,
+                      2.5f, uiAccent(), 0.8f, 1.f, 4);
+        }
+    }
+
+    void beginDrag(CCPoint p, float x, float y, float w, float h, int handle, int stat = -1) {
+        m_dragMode = handle < 0 ? 1 : 2;
+        m_dragStat = stat;
+        m_handle = handle;
+        m_dragStart = p;
+        m_dragRect[0] = x; m_dragRect[1] = y; m_dragRect[2] = w; m_dragRect[3] = h;
+    }
+
     void canvasDown(CCPoint p) {
         m_dragMode = 0;
         if (!m_mapMode) this->updateFit();
         View v = this->view();
 
-        if (!m_mapMode && (m_tab == 2 || m_tab == 4)) {
-            for (auto const& box : m_viewer->statGeo()) {
-                CCRect hit(v.ox + box.position.x * v.sc, v.oy + box.position.y * v.sc,
-                           box.width * v.sc, box.height * v.sc);
-                if (!hit.containsPoint(p)) continue;
-                selectStatEditor(box.metric + 1);
-                return;
+        if (m_tab == 2 && m_statTab > 0 && !m_mapMode) {
+            if (auto box = m_viewer->statBox(m_statTab - 1)) {
+                float x = v.ox + box->position.x * v.sc, y = v.oy + box->position.y * v.sc;
+                int handle = hitHandle(p, x, y, x + box->width * v.sc, y + box->height * v.sc);
+                if (handle >= 0) {
+                    beginDrag(p, box->position.x, box->position.y, box->width, box->height, handle, box->metric);
+                    return;
+                }
             }
+        }
+        auto const& stats = m_viewer->statGeo();
+        for (auto it = stats.rbegin(); it != stats.rend(); ++it) {
+            CCRect hit(v.ox + it->position.x * v.sc, v.oy + it->position.y * v.sc,
+                       it->width * v.sc, it->height * v.sc);
+            if (!hit.containsPoint(p)) continue;
+            beginDrag(p, it->position.x, it->position.y, it->width, it->height, -1, it->metric);
+            selectStatEditor(it->metric + 1);
+            return;
         }
 
         // 선택한 키의 손잡이를 먼저 확인 (지도 모드에서는 이동만 가능)
-        if (auto g = this->geoById(m_sel); g && !m_mapMode) {
+        if (auto g = this->geoById(m_sel); g && !m_mapMode && !(m_tab == 2 && m_statTab > 0)) {
             float x0 = v.ox + g->x * v.sc, y0 = v.oy + g->y * v.sc;
             float x1 = x0 + g->w * v.sc, y1 = y0 + g->h * v.sc;
             int hnd = this->hitHandle(p, x0, y0, x1, y1);
@@ -2777,7 +2673,9 @@ protected:
             auto const& g = geo[i];
             CCRect r(v.ox + g.x * v.sc, v.oy + g.y * v.sc, g.w * v.sc, g.h * v.sc);
             if (!r.containsPoint(p)) continue;
-            bool changed = (m_sel != g.id);
+            bool changed = m_sel != g.id || (m_tab == 2 && m_statTab > 0);
+            m_statTab = 0;
+            m_dragStat = -1;
             m_sel = g.id;
             m_dragMode = 1;
             m_dragStart = p;
@@ -2793,51 +2691,58 @@ protected:
 
     void canvasMove(CCPoint p) {
         if (m_dragMode == 0) return;
-        auto k = keyById(m_sel);
-        if (!k) return;
-        View v = this->view();
-        float dx = (p.x - m_dragStart.x) / v.sc;
-        float dy = (p.y - m_dragStart.y) / v.sc;
-        float x0 = m_dragRect[0], y0 = m_dragRect[1], w0 = m_dragRect[2], h0 = m_dragRect[3];
-
+        auto key = m_dragStat < 0 ? keyById(m_sel) : nullptr;
+        if (m_dragStat < 0 && !key) return;
+        View v = view();
+        if (v.sc <= 0.f) return;
+        float dx = (p.x - m_dragStart.x) / v.sc, dy = (p.y - m_dragStart.y) / v.sc;
+        float x = m_dragRect[0], y = m_dragRect[1], w = m_dragRect[2], h = m_dragRect[3];
         if (m_dragMode == 1) {
-            k->x = std::clamp(std::round(x0 + dx), -500.f, 500.f);
-            k->y = std::clamp(std::round(y0 + dy), -300.f, 300.f);
+            x += dx;
+            y += dy;
         } else {
-            int h = m_handle;
-            bool left = (h == 0 || h == 2 || h == 6);
-            bool right = (h == 1 || h == 3 || h == 7);
-            bool bottom = (h == 0 || h == 1 || h == 4);
-            bool top = (h == 2 || h == 3 || h == 5);
-            float nx = x0, ny = y0, nw = w0, nh = h0;
-            if (left) { nx = x0 + dx; nw = w0 - dx; }
-            if (right) { nw = w0 + dx; }
-            if (bottom) { ny = y0 + dy; nh = h0 - dy; }
-            if (top) { nh = h0 + dy; }
-            float mn = 12.f;
-            if (nw < mn) {
-                if (left) nx = x0 + w0 - mn;
-                nw = mn;
+            int edge = m_handle;
+            bool left = edge == 0 || edge == 2 || edge == 6;
+            bool right = edge == 1 || edge == 3 || edge == 7;
+            bool bottom = edge == 0 || edge == 1 || edge == 4;
+            bool top = edge == 2 || edge == 3 || edge == 5;
+            float oldW = w, oldH = h;
+            if (left || right) w = std::clamp(w + (left ? -dx : dx), m_dragStat < 0 ? 12.f : 24.f, m_dragStat < 0 ? 500.f : 200.f);
+            if (bottom || top) h = std::clamp(h + (bottom ? -dy : dy), 12.f, m_dragStat < 0 ? 500.f : 100.f);
+            if (left) x += oldW - w;
+            if (bottom) y += oldH - h;
+        }
+        x = std::clamp(std::round(x), -500.f, 500.f);
+        y = std::clamp(std::round(y), -300.f, 300.f);
+        if (key) {
+            key->x = x;
+            key->y = y;
+            if (m_dragMode == 2) {
+                key->w = std::round(w);
+                key->h = std::round(h);
             }
-            if (nh < mn) {
-                if (bottom) ny = y0 + h0 - mn;
-                nh = mn;
+        } else {
+            auto& box = g_statSettings[m_dragStat];
+            box["anchor"] = 5;
+            box["x"] = x;
+            box["y"] = y;
+            if (m_dragMode == 2) {
+                box["width"] = std::round(w);
+                box["height"] = std::round(h);
             }
-            k->x = std::round(nx);
-            k->y = std::round(ny);
-            k->w = std::round(nw);
-            k->h = std::round(nh);
         }
         m_viewer->applyLook();
-        this->redrawCanvas();
+        redrawCanvas();
     }
 
     void canvasUp(CCPoint) {
         if (m_dragMode == 0) return;
         m_dragMode = 0;
-        if (auto k = keyById(m_sel)) saveKey(*k);
-        m_pendingRebuild = true; // 슬라이더 값을 새 값으로 갱신
-        this->redrawCanvas();
+        if (m_dragStat >= 0) saveStat(m_dragStat);
+        else if (auto key = keyById(m_sel)) saveKey(*key);
+        m_dragStat = -1;
+        m_pendingRebuild = true;
+        redrawCanvas();
     }
 
     // ---------- 인스펙터 (오른쪽 패널) ----------
@@ -2865,7 +2770,7 @@ protected:
 
     void rowInfo(std::string const& text) {
         int ri = beginRow(18.f);
-        if (auto label = rowLabel(ri, text, 0.f, m_rows[ri].top - 9.f, 0.28f, {170, 170, 190}, 0.f))
+        if (auto label = rowLabel(ri, text, 0.f, m_rows[ri].top - 9.f, 0.28f, uiMuted(), 0.f))
             label->setScale(std::min(0.28f, m_inW / std::max(1.f, label->getContentSize().width)));
     }
 
@@ -2875,7 +2780,7 @@ protected:
         float w = m_inW;
         auto d = rowDraw(ri);
         dnRound(d, 0.f, top - 24.f, w, top - 4.f, 6.f, color, 1.f, 4);
-        rowLabel(ri, label, w / 2.f, top - 14.f, 0.30f, kWhite, 0.5f);
+        rowLabel(ri, label, w / 2.f, top - 14.f, 0.30f, textFor(color), 0.5f);
         Ctl c;
         c.scroll = true;
         c.row = ri;
@@ -2884,44 +2789,32 @@ protected:
         m_scrollCtls.push_back(c);
     }
 
-    void rowSlider(std::string const& label, float vmin, float vmax, float step,
-                   std::function<float()> get, std::function<void(float)> set,
-                   std::function<std::string(float)> fmt = nullptr) {
-        int ri = beginRow(26.f);
-        float top = m_rows[ri].top;
-        float w = m_inW;
-        rowLabel(ri, label, 0.f, top - 8.f, 0.30f, ccColor3B{235, 235, 240}, 0.f);
-        auto val = rowLabel(ri, "", w, top - 8.f, 0.30f, kPassiveText, 1.f);
-        auto d = rowDraw(ri);
-        float tx0 = 3.f, tx1 = w - 3.f, ty = top - 19.f;
-
-        auto refresh = [=]() {
-            float v = std::clamp(get(), vmin, vmax);
-            float t = (vmax > vmin) ? (v - vmin) / (vmax - vmin) : 0.f;
-            float kx = tx0 + t * (tx1 - tx0);
-            d->clear();
-            dnRect(d, tx0, ty - 1.2f, tx1, ty + 1.2f, kPanelLine, 1.f);
-            dnRect(d, tx0, ty - 1.2f, kx, ty + 1.2f, kBlue, 1.f);
-            dnRound(d, kx - 4.f, ty - 4.f, kx + 4.f, ty + 4.f, 4.f, kWhite, 1.f, 3);
-            if (val) val->setString(uiText(fmt ? fmt(v) : fmtNum(v)).c_str());
+    void rowNumber(std::string const& label, float min, float max, float step,
+                   std::function<float()> get, std::function<void(float)> set) {
+        int row = beginRow(27.f);
+        float top = m_rows[row].top;
+        float field = std::min(63.f, m_inW * 0.41f);
+        float x = m_inW - field;
+        auto title = rowLabel(row, label, 0.f, top - 13.5f, 0.28f, uiInk(), 0.f);
+        if (title) title->setScale(std::min(0.28f, (x - 4.f) / std::max(1.f, title->getContentSize().width)));
+        auto draw = rowDraw(row);
+        dnRound(draw, x, top - 23.5f, m_inW, top - 3.5f, 5.f, uiField());
+        dnStrokeA(draw, x + 0.5f, top - 23.f, m_inW - 0.5f, top - 4.f, 4.f, uiAccent(), 0.75f, 0.56f, 4);
+        rowLabel(row, fmtNum(get()), x + field / 2.f, top - 13.5f, 0.29f, uiInk(), 0.5f);
+        Ctl ctl;
+        ctl.row = row;
+        ctl.r = CCRect(x, top - 25.f, field, 23.f);
+        ctl.down = [this, label, get, set, min, max, step](CCPoint) {
+            showInput(label, fmtNum(get()), true, [set, min, max, step](std::string const& text) {
+                char* end = nullptr;
+                float value = std::strtof(text.c_str(), &end);
+                if (end == text.c_str() || *end || !std::isfinite(value) || value < min || value > max) return false;
+                if (step >= 1.f) value = std::round(value);
+                set(value);
+                return true;
+            });
         };
-        refresh();
-
-        auto apply = [=](float x) {
-            float t = std::clamp((x - tx0) / (tx1 - tx0), 0.f, 1.f);
-            float v = vmin + t * (vmax - vmin);
-            v = std::round(v / step) * step;
-            set(std::clamp(v, vmin, vmax));
-            refresh();
-        };
-
-        Ctl c;
-        c.scroll = true;
-        c.row = ri;
-        c.r = CCRect(0.f, top - 26.f, w, 26.f);
-        c.down = [apply](CCPoint p) { apply(p.x); };
-        c.move = [apply](CCPoint p) { apply(p.x); };
-        m_scrollCtls.push_back(c);
+        m_scrollCtls.push_back(ctl);
     }
 
     // 왼쪽 오른쪽 화살표로 선택지를 돌려 고르는 줄
@@ -2930,19 +2823,19 @@ protected:
         int ri = beginRow(24.f);
         float top = m_rows[ri].top;
         float w = m_inW;
-        auto title = rowLabel(ri, label, 0.f, top - 12.f, 0.30f, ccColor3B{235, 235, 240}, 0.f);
+        auto title = rowLabel(ri, label, 0.f, top - 12.f, 0.30f, uiInk(), 0.f);
         auto d = rowDraw(ri);
         float pickerWidth = std::min(118.f, w * 0.65f);
         float zx0 = w - pickerWidth;
         float mid = zx0 + pickerWidth / 2.f;
         if (title) title->setScale(std::min(0.30f, std::max(4.f, zx0 - 4.f) / std::max(1.f, title->getContentSize().width)));
-        auto val = rowLabel(ri, "", mid, top - 12.f, 0.30f, kWhite, 0.5f);
+        auto val = rowLabel(ri, "", mid, top - 12.f, 0.30f, uiInk(), 0.5f);
         int n = static_cast<int>(opts.size());
 
-        auto refresh = [=]() {
+        auto refresh = [=, this]() {
             d->clear();
-            dnRound(d, zx0, top - 20.f, zx0 + 18.f, top - 4.f, 4.f, kPanelRaised, 1.f, 3);
-            dnRound(d, w - 18.f, top - 20.f, w, top - 4.f, 4.f, kPanelRaised, 1.f, 3);
+            dnRound(d, zx0, top - 20.f, zx0 + 18.f, top - 4.f, 4.f, uiField(), 1.f, 3);
+            dnRound(d, w - 18.f, top - 20.f, w, top - 4.f, 4.f, uiField(), 1.f, 3);
             int cur = std::clamp(get(), 0, n - 1);
             if (val) {
                 val->setString(uiText(opts[cur]).c_str());
@@ -2951,8 +2844,8 @@ protected:
                 val->setScale(lw > maxW && lw > 0.f ? 0.30f * maxW / lw : 0.30f);
             }
         };
-        rowLabel(ri, "<", zx0 + 9.f, top - 12.f, 0.34f, kWhite, 0.5f);
-        rowLabel(ri, ">", w - 9.f, top - 12.f, 0.34f, kWhite, 0.5f);
+        rowLabel(ri, "<", zx0 + 9.f, top - 12.f, 0.34f, uiInk(), 0.5f);
+        rowLabel(ri, ">", w - 9.f, top - 12.f, 0.34f, uiInk(), 0.5f);
         refresh();
 
         Ctl c;
@@ -2968,15 +2861,56 @@ protected:
         m_scrollCtls.push_back(c);
     }
 
+    void openColors(GradientStops current, bool gradient,
+                    std::function<void(GradientStops const&)> apply) {
+        auto popup = VisualColorPopup::create(current, gradient, m_light, std::move(apply), [this] {
+            m_modal = false;
+            m_pendingRebuild = true;
+        });
+        if (!popup) return;
+        m_modal = true;
+        popup->show();
+    }
+
+    void rowGradient(int id) {
+        auto key = keyById(id);
+        if (!key) return;
+        auto stops = lookForKey(readLook(), *key).noteGradient;
+        int row = beginRow(33.f);
+        float top = m_rows[row].top;
+        auto draw = rowDraw(row);
+        rowLabel(row, "Edit gradient", 0.f, top - 7.f, 0.28f, uiInk(), 0.f);
+        drawRamp(draw, stops, 1.f, top - 28.f, m_inW - 2.f, 15.f);
+        dnStrokeA(draw, 0.5f, top - 28.5f, m_inW - 0.5f, top - 12.5f, 2.f, uiLine(), 0.7f, 0.9f);
+        Ctl control;
+        control.row = row;
+        control.r = CCRect(0.f, top - 30.f, m_inW, 30.f);
+        control.down = [this, id](CCPoint) {
+            auto key = keyById(id);
+            if (!key) return;
+            openColors(lookForKey(readLook(), *key).noteGradient, true, [this, id](GradientStops const& changed) {
+                auto current = keyById(id);
+                if (!current) return;
+                current->style["note-gradient-enabled"] = 1;
+                current->style["note-gradient-bottom"] = changed[0].color;
+                current->style["note-gradient-top"] = changed[1].color;
+                current->style["gradient-bottom-alpha"] = changed[0].alpha;
+                current->style["gradient-top-alpha"] = changed[1].alpha;
+                commitKey(id);
+            });
+        };
+        m_scrollCtls.push_back(control);
+    }
+
     void rowColor(std::string const& label, std::function<int()> get, std::function<void(int)> set, bool allowAuto) {
         int row = beginRow(40.f);
         float top = m_rows[row].top;
         float width = m_inW;
-        rowLabel(row, label, 0.f, top - 8.f, 0.30f, kWhite, 0.f);
+        rowLabel(row, label, 0.f, top - 8.f, 0.30f, uiInk(), 0.f);
         int color = get();
         float swatchRight = allowAuto ? width * 0.64f : width;
         auto draw = rowDraw(row);
-        ccColor3B swatch = color < 0 ? kPanelRaised : unpackC(color);
+        ccColor3B swatch = color < 0 ? uiField() : unpackC(color);
         dnRound(draw, 0.f, top - 35.f, swatchRight, top - 17.f, 4.f, swatch, 1.f, 3);
         rowLabel(row, "Choose color", swatchRight / 2.f, top - 26.f, 0.28f, textFor(swatch), 0.5f);
 
@@ -2985,22 +2919,15 @@ protected:
         choose.r = CCRect(0.f, top - 36.f, swatchRight, 20.f);
         choose.down = [this, get, set](CCPoint) {
             int color = get();
-            auto picker = geode::ColorPickPopup::create(color < 0 ? ccColor3B{255, 255, 255} : unpackC(color));
-            if (!picker) return;
-            m_modal = true;
-            picker->setCallback([this, set](ccColor4B const& picked) {
-                set(packC({picked.r, picked.g, picked.b}));
-                m_modal = false;
-                m_pendingRebuild = true;
-            });
-            picker->show();
+            GradientStops initial = {{{color < 0 ? 0xffffff : color, 255}, {0xffffff, 255}}};
+            openColors(initial, false, [set](GradientStops const& edited) { set(edited[0].color); });
         };
         m_scrollCtls.push_back(choose);
         if (!allowAuto) return;
 
         dnRound(draw, swatchRight + 3.f, top - 35.f, width, top - 17.f, 4.f,
-                color < 0 ? kBlue : kPanelRaised, 1.f, 3);
-        rowLabel(row, "AUTO", (swatchRight + 3.f + width) / 2.f, top - 26.f, 0.28f, kWhite, 0.5f);
+                color < 0 ? uiAccent() : uiField(), 1.f, 3);
+        rowLabel(row, "AUTO", (swatchRight + 3.f + width) / 2.f, top - 26.f, 0.28f, uiInk(), 0.5f);
         Ctl reset;
         reset.row = row;
         reset.r = CCRect(swatchRight + 3.f, top - 36.f, width - swatchRight - 3.f, 20.f);
@@ -3015,16 +2942,16 @@ protected:
         int ri = beginRow(22.f);
         float top = m_rows[ri].top;
         float w = m_inW;
-        rowLabel(ri, label, 0.f, top - 11.f, 0.30f, ccColor3B{235, 235, 240}, 0.f);
+        rowLabel(ri, label, 0.f, top - 11.f, 0.30f, uiInk(), 0.f);
         auto d = rowDraw(ri);
 
-        auto refresh = [=]() {
+        auto refresh = [=, this]() {
             bool on = get();
             d->clear();
             dnRound(d, w - 30.f, top - 17.f, w - 2.f, top - 5.f, 6.f,
-                    on ? kActiveTile : kPanelLine, 1.f, 4);
+                    on ? lerpC(uiField(), uiAccent(), 0.28f) : uiLine(), 1.f, 4);
             float kx = on ? w - 8.f : w - 24.f;
-            dnRound(d, kx - 5.f, top - 16.f, kx + 5.f, top - 6.f, 5.f, kWhite, 1.f, 4);
+            dnRound(d, kx - 5.f, top - 16.f, kx + 5.f, top - 6.f, 5.f, uiField(), 1.f, 4);
         };
         refresh();
 
@@ -3044,7 +2971,7 @@ protected:
         int ri = beginRow(36.f);
         float top = m_rows[ri].top;
         float w = m_inW;
-        rowLabel(ri, label, 0.f, top - 8.f, 0.30f, ccColor3B{235, 235, 240}, 0.f);
+        rowLabel(ri, label, 0.f, top - 8.f, 0.30f, uiInk(), 0.f);
         auto d = rowDraw(ri);
         int n = static_cast<int>(opts.size());
         float bw = (w - (n - 1) * 3.f) / n;
@@ -3052,16 +2979,16 @@ protected:
 
         for (int i = 0; i < n; i++) {
             float cxm = i * (bw + 3.f) + bw / 2.f;
-            rowLabel(ri, opts[i], cxm, (y0 + y1) / 2.f, 0.28f, kWhite, 0.5f);
+            rowLabel(ri, opts[i], cxm, (y0 + y1) / 2.f, 0.28f, uiInk(), 0.5f);
         }
 
-        auto refresh = [=]() {
+        auto refresh = [=, this]() {
             d->clear();
             int cur = get();
             for (int i = 0; i < n; i++) {
                 float x0 = i * (bw + 3.f);
                 dnRound(d, x0, y0, x0 + bw, y1, 4.f,
-                        i == cur ? kActiveTile : kPanelRaised, 1.f, 3);
+                        i == cur ? lerpC(uiField(), uiAccent(), 0.28f) : uiField(), 1.f, 3);
             }
         };
         refresh();
@@ -3076,70 +3003,6 @@ protected:
             refresh();
         };
         m_scrollCtls.push_back(c);
-    }
-
-    void applyStylePreset(std::string const& data, std::string const& status) {
-        auto prior = serializePreset(m_sel);
-        if (!applyPresetData(data, m_sel)) {
-            setStatus("Invalid preset.");
-            return;
-        }
-        m_undoPreset[m_sel] = std::move(prior);
-        refreshAll(true);
-        m_pendingRebuild = true;
-        setStatus(Mod::get()->saveData().isOk() ? status : uiText("Preset storage failed."));
-    }
-
-    // 사용자 프리셋 한 줄: 이름 + LOAD / SAVE / DEL
-    void rowPresetEntry(int i) {
-        int ri = beginRow(28.f);
-        float top = m_rows[ri].top;
-        float w = m_inW;
-        auto d = rowDraw(ri);
-        float bw = std::min(32.f, w * 0.22f), bh = 18.f;
-        float y0 = top - 23.f, y1 = y0 + bh;
-        float xs[3] = {w - 3.f * bw - 4.f, w - 2.f * bw - 2.f, w - bw};
-        char const* names[3] = {"LOAD", "SAVE", "DEL"};
-        ccColor3B cols[3] = {{70, 110, 240}, {60, 150, 90}, {170, 70, 80}};
-
-        std::function<void()> actions[3];
-        actions[0] = [this, i]() {
-            applyStylePreset(presetData(i), uiText("Loaded ") + presetName(i));
-        };
-        actions[1] = [this, i]() {
-            presetSetData(i, serializePreset(m_sel));
-            this->setStatus(Mod::get()->saveData().isOk() ? uiText("Saved over ") + presetName(i) : uiText("Preset storage failed."));
-        };
-        actions[2] = [this, i]() {
-            std::string n = presetName(i);
-            presetDelete(i);
-            m_pendingRebuild = true;
-            this->setStatus(Mod::get()->saveData().isOk() ? uiText("Deleted ") + n : uiText("Preset storage failed."));
-        };
-
-        for (int k = 0; k < 3; k++) {
-            dnRound(d, xs[k], y0, xs[k] + bw, y1, 4.f, cols[k], 1.f, 3);
-            rowLabel(ri, names[k], xs[k] + bw / 2.f, (y0 + y1) / 2.f, 0.26f, kWhite, 0.5f);
-            Ctl c;
-            c.scroll = true;
-            c.row = ri;
-            c.r = CCRect(xs[k], y0, bw, bh);
-            auto act = actions[k];
-            c.down = [act](CCPoint) { act(); };
-            m_scrollCtls.push_back(c);
-        }
-
-        auto nameLab = rowLabel(ri, presetName(i), 0.f, (y0 + y1) / 2.f, 0.30f, kWhite, 0.f);
-        if (nameLab) {
-            auto name = presetName(i);
-            if (hasHangul(name)) {
-                setFont(nameLab, 0, true);
-                nameLab->setString(name.c_str());
-            }
-            float lw = nameLab->getContentSize().width * 0.30f;
-            float maxW = xs[0] - 6.f;
-            if (lw > maxW && lw > 0.f) nameLab->setScale(0.30f * maxW / lw);
-        }
     }
 
     // 전체 설정(모드 설정)과 연결된 슬라이더, 스위치, 색
@@ -3165,7 +3028,7 @@ protected:
     void settingSlider(std::string const& label, char const* key, float vmin, float vmax, float step, bool isInt = false) {
         std::string k = key;
         int id = styleKey();
-        rowSlider(label, vmin, vmax, step,
+        rowNumber(label, vmin, vmax, step,
             [k, isInt, id]() {
                 double base = isInt ? double(Mod::get()->getSettingValue<int64_t>(k)) : Mod::get()->getSettingValue<double>(k);
                 return static_cast<float>(styleValue(id, k, base));
@@ -3210,6 +3073,7 @@ protected:
         if (popup) {
             m_modal = true;
             popup->show();
+            if (numeric) popup->focusInput();
         }
     }
 
@@ -3218,7 +3082,7 @@ protected:
                      std::array<float, 2> const& low, std::array<float, 2> const& high) {
         int row = beginRow(44.f);
         float top = m_rows[row].top;
-        rowLabel(row, title, 0.f, top - 8.f, 0.30f, kWhite, 0.f);
+        rowLabel(row, title, 0.f, top - 8.f, 0.30f, uiInk(), 0.f);
         auto bg = rowDraw(row);
         float width = (m_inW - 4.f) / 2.f;
         for (size_t i = 0; i < fields.size(); ++i) {
@@ -3227,7 +3091,7 @@ protected:
             float x = i * (width + 4.f);
             dnRound(bg, x, top - 39.f, x + width, top - 17.f, 4.f, {58, 58, 72}, 1.f, 3);
             std::string label = std::string(names[i]) + "  " + fmtNum(key->*fields[i]);
-            rowLabel(row, label, x + width / 2.f, top - 28.f, 0.32f, kWhite, 0.5f);
+            rowLabel(row, label, x + width / 2.f, top - 28.f, 0.32f, uiInk(), 0.5f);
             Ctl ctl;
             ctl.row = row;
             ctl.r = CCRect(x, top - 39.f, width, 22.f);
@@ -3252,7 +3116,7 @@ protected:
 
     void localSlider(std::string const& label, std::string const& style, float low, float high, float step, float base) {
         int id = m_sel;
-        rowSlider(label, low, high, step,
+        rowNumber(label, low, high, step,
             [id, style, base] { return static_cast<float>(styleValue(id, style, base)); },
             [this, id, style](float value) { writeStyle(id, style, value); });
     }
@@ -3283,7 +3147,7 @@ protected:
         int id = m_sel;
         {
             int ri = beginRow(18.f);
-            rowLabel(ri, uiText("KEY  ") + describeKey(id), 0.f, m_rows[ri].top - 9.f, 0.32f, kWhite, 0.f);
+            rowLabel(ri, uiText("KEY  ") + describeKey(id), 0.f, m_rows[ri].top - 9.f, 0.32f, uiInk(), 0.f);
         }
         std::vector<int> ids;
         std::vector<std::string> names;
@@ -3342,20 +3206,14 @@ protected:
         localSlider("Font size", "label-size", 4.f, 40.f, 1.f, 10.f);
         localColor("Font color", "label-color", -1, true);
         float gr = readLook().radius * 100.f;
-        rowSlider("Rounding %", 0.f, 50.f, 1.f,
+        rowNumber("Rounding %", 0.f, 50.f, 1.f,
             [id, gr]() { auto k = keyById(id); return (k && k->radius >= 0.f) ? k->radius : gr; },
             [this, id](float v) { if (auto k = keyById(id)) k->radius = v; this->commitKey(id); });
-        rowSlider("Border width", 0.f, 6.f, 0.5f,
+        rowNumber("Border width", 0.f, 6.f, 0.5f,
             [id]() { auto k = keyById(id); return k ? k->borderW : 0.f; },
             [this, id](float v) { if (auto k = keyById(id)) k->borderW = v; this->commitKey(id); });
         settingSlider("Idle opacity", "tile-opacity", 0.f, 255.f, 1.f, true);
         settingToggle("Press glow", "show-glow");
-        localChoice("Key surface", "surface", {"Classic", "Alloy", "Glass", "Edge"}, readLook().surface);
-        localChoice("Press response", "impact", {"Off", "Sweep", "Shockwave", "Sparks"}, readLook().impact);
-        localSlider("Response intensity %", "impact-strength", 0.f, 100.f, 5.f, 65.f);
-        localSlider("Key travel %", "key-travel", 0.f, 12.f, 1.f, 4.5f);
-        localToggle("Accent rail", "accent-rail", true);
-        localToggle("Hold meter", "hold-meter", true);
         settingToggle("Key counters", "show-counter");
         localToggle("Box gradient", "tile-idle-gradient", false);
         settingColor("Gradient end color", "gradient-color");
@@ -3374,7 +3232,7 @@ protected:
         int id = m_sel;
         {
             int ri = beginRow(18.f);
-            rowLabel(ri, uiText("NOTES  ") + describeKey(id), 0.f, m_rows[ri].top - 9.f, 0.32f, kWhite, 0.f);
+            rowLabel(ri, uiText("NOTES  ") + describeKey(id), 0.f, m_rows[ri].top - 9.f, 0.32f, uiInk(), 0.f);
         }
         rowColor("Note color (this key)",
             [id]() { auto k = keyById(id); return k ? k->accent : -1; },
@@ -3387,34 +3245,10 @@ protected:
         localSlider("Gap above key", "note-base-gap", 0.f, 30.f, 1.f, 5.f);
         this->settingSlider("Speed", "note-speed", 100.f, 600.f, 5.f);
         this->settingSlider("Timeline length", "note-height", 40.f, 220.f, 5.f);
-        rowChoice("Gradient colors", {"Off", "Notes", "Tile", "Both"},
-            [id]() {
-                auto g = Mod::get()->getSettingValue<std::string>("gradient-mode");
-                for (int i = 0; i < 4; i++) if (g == kGradNames[i]) return static_cast<int>(std::clamp(styleValue(id, "gradient-mode", i), 0.0, 3.0));
-                return 0;
-            },
-            [this, id](int i) {
-                writeStyle(id, "gradient-mode", i);
-            });
-        rowButton("Apply neon gradient", {70, 110, 240}, [this, id] {
-            if (auto key = keyById(id)) {
-                key->style["gradient-mode"] = 1;
-                key->style["show-timeline"] = 1;
-                key->style["neon-gradient"] = 1;
-                key->style["note-glow"] = 1;
-                key->style["note-gradient-top"] = 0xffffff;
-                if (packC(lookForKey(readLook(), *key).accentJump) == 0xffffff) key->accent = 0xff293b;
-                commitKey(id);
-                m_pendingRebuild = true;
-            }
-        });
-        localToggle("Neon gradient", "neon-gradient", true);
-        localChoice("Gradient profile", "note-highlight-profile", {"Soft", "Linear", "Bright tip"}, 0);
-        localToggle("Reverse gradient", "gradient-reverse", false);
-        localToggle("Note light strip", "note-core", false);
-        localSlider("Rim opacity %", "note-rim-opacity", 0.f, 100.f, 5.f, 96.f);
-        localColor("Note gradient top", "note-gradient-top", 0xffffff, false);
-        this->settingColor("Gradient end color", "gradient-color");
+        rowToggle("Note gradient",
+            [id] { auto key = keyById(id); return key && lookForKey(readLook(), *key).gradNotes; },
+            [this, id](bool enabled) { writeStyle(id, "note-gradient-enabled", enabled); });
+        rowGradient(id);
         this->settingSlider("Note opacity %", "note-opacity", 20.f, 100.f, 1.f);
         this->settingSlider("Note fade", "note-fade", 0.f, 3.f, 0.1f);
         this->settingSlider("Note round %", "note-radius", 0.f, 50.f, 1.f);
@@ -3434,7 +3268,7 @@ protected:
     }
 
     void statSlider(int metric, std::string label, std::string key, float min, float max, float step, float base) {
-        rowSlider(label, min, max, step, [metric, key, base] { return static_cast<float>(statValue(metric, key, base)); },
+        rowNumber(label, min, max, step, [metric, key, base] { return static_cast<float>(statValue(metric, key, base)); },
             [this, metric, key](float value) { updateStat(metric, key, value); });
     }
 
@@ -3455,7 +3289,7 @@ protected:
 
     void buildStatOptions(int metric) {
         auto base = readLook();
-        statToggle(metric, "Show box", "visible", metric == TotalMetric ? base.total : base.kps);
+        statToggle(metric, "Show box", "visible", metric == TotalMetric ? base.total : metric == KpsMetric && base.kps);
         statChoice(metric, "Box language", "language", {"Same as editor", "Korean", "English"}, 0);
         rowButton("Edit box title", {58, 58, 72}, [this, metric] {
             showInput("Edit box title", statName(metric), false, [this, metric](std::string const& text) {
@@ -3466,19 +3300,17 @@ protected:
                 return true;
             });
         });
-        statChoice(metric, "Box anchor", "anchor", {"AUTO", "Right", "Left", "Below", "Above"}, 0);
-        statSlider(metric, "Position X", "x", -250.f, 250.f, 1.f, 0.f);
-        statSlider(metric, "Position Y", "y", -200.f, 200.f, 1.f, 0.f);
-        statSlider(metric, "Width", "width", 24.f, 200.f, 1.f, 45.f);
-        statSlider(metric, "Height", "height", 18.f, 100.f, 1.f, 27.f);
+        statChoice(metric, "Box anchor", "anchor", {"AUTO", "Right", "Left", "Below", "Above", "Free"}, 0);
+        statSlider(metric, "Position X", "x", -500.f, 500.f, 1.f, 0.f);
+        statSlider(metric, "Position Y", "y", -300.f, 300.f, 1.f, 0.f);
+        statSlider(metric, "Width", "width", 24.f, 200.f, 1.f, 72.f);
+        statSlider(metric, "Height", "height", 12.f, 100.f, 1.f, 19.f);
+        statToggle(metric, "Side-by-side text", "stat-inline", true);
         statColor(metric, "Background color", "background", -1);
         statSlider(metric, "Idle opacity", "tile-opacity", 0.f, 255.f, 1.f, base.tileOpacity);
-        statSlider(metric, "Rounding %", "roundness", 0.f, 50.f, 1.f, 10.f);
+        statSlider(metric, "Rounding %", "roundness", 0.f, 50.f, 1.f, 7.f);
         statColor(metric, "Border color", "rim", -1);
         statSlider(metric, "Border width", "rim-width", 0.f, 4.f, 0.25f, 0.f);
-        statChoice(metric, "Key surface", "surface", {"Classic", "Alloy", "Glass", "Edge"}, base.surface);
-        if (metric != TotalMetric) statToggle(metric, "Activity meter", "activity-meter", metric == KpsMetric);
-        statColor(metric, "Accent color", "accent", 0x66dfff, false);
         statToggle(metric, "Box gradient", "idle-gradient", false);
         statColor(metric, "Gradient end color", "gradient-color", packC(base.gradEnd));
         statChoice(metric, "Title font", "label-font", {"Inter", "Noto Sans", "GD Big", "GD Gold"}, 0);
@@ -3508,8 +3340,8 @@ protected:
             float x = (i % 2) * (width + 4.f);
             float y = top - 24.f * (1 + i / 2);
             dnRound(draw, x, y, x + width, y + 20.f, 4.f,
-                    m_statTab == i ? kBlue : kPanelRaised, 1.f, 3);
-            auto label = rowLabel(row, labels[i], x + width / 2.f, y + 10.f, 0.28f, kWhite, 0.5f);
+                    m_statTab == i ? uiAccent() : uiField(), 1.f, 3);
+            auto label = rowLabel(row, labels[i], x + width / 2.f, y + 10.f, 0.28f, uiInk(), 0.5f);
             if (label) label->setScale(std::min(0.28f, (width - 6.f) / std::max(1.f, label->getContentSize().width)));
             Ctl control;
             control.row = row;
@@ -3591,7 +3423,6 @@ protected:
         rowButton("Align vertical", {58, 58, 72}, [this] { alignKeys(false, false); });
         rowButton("Space evenly in row", {58, 58, 72}, [this] { alignKeys(true, true); });
         rowButton("Space evenly in column", {58, 58, 72}, [this] { alignKeys(false, true); });
-        settingToggle("Reduce extra motion", "reduce-motion");
         this->settingSlider("Box size", "box-size", 24.f, 80.f, 1.f);
         this->settingSlider("Jump width x", "jump-width", 0.5f, 3.f, 0.1f);
         this->settingSlider("Corner round %", "corner-radius", 0.f, 50.f, 1.f);
@@ -3605,54 +3436,6 @@ protected:
         this->settingSlider("Position Y %", "pos-y", 0.f, 100.f, 1.f);
     }
 
-    void studioPresetCard(StudioStyle const& style) {
-        int row = beginRow(32.f);
-        float top = m_rows[row].top;
-        auto draw = rowDraw(row);
-        auto accent = unpackC(style.accent);
-        dnRound(draw, 0.f, top - 29.f, m_inW, top - 3.f, 6.f, unpackC(style.face), 1.f, 4);
-        dnStrokeA(draw, 0.5f, top - 28.5f, m_inW - 0.5f, top - 3.5f, 5.f, accent, 0.7f, 0.55f, 4);
-        dnRound(draw, 6.f, top - 23.f, 18.f, top - 9.f, 3.4f, accent, 0.91f, 4);
-        auto title = rowLabel(row, style.title, 25.f, top - 16.f, 0.30f, kWhite, 0.f);
-        if (title) title->setScale(std::min(0.30f, (m_inW - 48.f) / std::max(1.f, title->getContentSize().width)));
-        rowLabel(row, ">", m_inW - 8.f, top - 16.f, 0.31f, accent, 0.5f);
-        Ctl ctl;
-        ctl.row = row;
-        ctl.r = CCRect(0.f, top - 29.f, m_inW, 26.f);
-        ctl.down = [this, style](CCPoint) { applyStylePreset(studioPreset(style), uiText("Loaded ") + uiText(style.title)); };
-        m_scrollCtls.push_back(ctl);
-    }
-
-    void buildPresetTab() {
-        rowInfo(uiText("Apply to selected key ") + describeKey(m_sel));
-        if (m_undoPreset.contains(m_sel)) {
-            rowButton("Undo preset change", kPanelRaised, [this] {
-                auto previous = m_undoPreset.at(m_sel);
-                applyStylePreset(previous, "Restored prior style.");
-            });
-        }
-        rowButton("Save style as preset", kActiveTile, [this] {
-            showInput("Preset name", "", false, [this](std::string const& name) {
-                if (!validName(name)) return false;
-                presetAdd(serializePreset(m_sel), name);
-                setStatus(Mod::get()->saveData().isOk() ? "Saved a new preset." : "Preset storage failed.");
-                return true;
-            });
-        });
-        rowInfo("Studio presets");
-        for (auto const& style : kStudioStyles) studioPresetCard(style);
-        rowInfo("Reference photo presets");
-        for (int i = 0; i < 3; ++i) {
-            rowButton(kPhotoPresets[i], {58, 58, 72}, [this, i] {
-                applyStylePreset(photoPreset(i), uiText("Loaded ") + uiText(kPhotoPresets[i]));
-            });
-        }
-        int n = presetCount();
-        if (n == 0) rowInfo("No presets yet.");
-        for (int i = 0; i < n; i++) rowPresetEntry(i);
-        rowInfo("Presets store appearance only.");
-    }
-
     void rebuildInspector() {
         m_content->removeAllChildrenWithCleanup(true);
         m_scrollCtls.clear();
@@ -3662,7 +3445,7 @@ protected:
         else if (m_tab == 1) this->buildNoteTab();
         else if (m_tab == 2) this->buildCounterTab();
         else if (m_tab == 3) this->buildViewTab();
-        else this->buildPresetTab();
+
         m_contentH = -m_cursor;
         float maxS = std::max(0.f, m_contentH - (vpY1 - vpY0));
         m_scroll = std::clamp(m_scroll, 0.f, maxS);
@@ -3804,18 +3587,14 @@ public:
     void ccTouchEnded(CCTouch* touch, CCEvent*) override { this->finishTouch(touch); }
     void ccTouchCancelled(CCTouch* touch, CCEvent*) override { this->finishTouch(touch); }
 
-    void update(float dt) override {
-        if (!m_previewTiles.empty()) {
-            auto time = nowSec();
-            for (auto const& [id, tile] : m_previewTiles) if (tile->isVisible()) tile->tick(time, dt, 0.f);
-        }
+    void update(float) override {
         if (m_reloadLanguage) {
             m_reloadLanguage = false;
             if (auto next = KVEditor::create(m_viewer)) {
                 next->m_sel = m_sel;
                 next->m_tab = m_tab;
                 next->m_statTab = m_statTab;
-                next->m_undoPreset = m_undoPreset;
+                next->m_scroll = m_scroll;
                 next->setMapMode(false);
                 getParent()->addChild(next, 100000);
                 removeFromParentAndCleanup(true);
@@ -3830,6 +3609,7 @@ public:
             m_closing = false;
             this->setPauseVisible(true);
             m_viewer->applyLook();
+            (void)Mod::get()->saveData();
             (void)Mod::get()->saveData();
             this->removeFromParentAndCleanup(true);
         }
