@@ -1,3 +1,10 @@
+# v0.9.1
+
+- Scroll the editor with the mouse wheel and move the overlay vertically in Map mode.
+- Save preset changes immediately, restore viewer visibility, and report invalid presets.
+- Bind physical keyboard keys and type exact X/Y and W/H values.
+- Customize key text, font, color, note auto-Y and counter placement, fill, outline and motion per key.
+
 # v0.9.0
 
 - Korean and English editor with bundled Korean UI glyphs.

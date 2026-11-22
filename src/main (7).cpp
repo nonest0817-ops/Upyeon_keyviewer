@@ -2,6 +2,11 @@
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
 #include <Geode/modify/PauseLayer.hpp>
+#include <Geode/modify/CCKeyboardDispatcher.hpp>
+#include <Geode/ui/Popup.hpp>
+#include <Geode/ui/TextInput.hpp>
+#include <array>
+#include <set>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -215,6 +220,25 @@ struct Look {
     bool glow = true;
     bool noteGlow = true;
     bool resetOnRestart = false;
+    int keyCode = 0;
+    int labelFont = 0;
+    float labelSize = 10.f;
+    int labelColor = -1;
+    bool noteAutoY = false;
+    int countArea = 0;
+    int countDirection = 0;
+    int countAlign = 1;
+    float countGap = 3.f;
+    bool countFill = true;
+    int countColor = -1;
+    float countOutline = 0.f;
+    ccColor3B countOutlineColor = {0, 0, 0};
+    int countFont = 0;
+    float countSize = 7.f;
+    bool countMotion = false;
+    int countMotionType = 0;
+    float countMotionAmount = 25.f;
+    float countMotionTime = 0.22f;
     float posX = 85.f;
     float posY = 10.f;
 };
@@ -306,6 +330,7 @@ static StyleValues decodeStyle(std::string const& encoded) {
 
 struct KeyDef {
     StyleValues style;
+    std::string text;
     int id = 0;
     int map = 0;
     float x = 0.f, y = 0.f;      // 키뷰어 기준 왼쪽 아래 위치
@@ -349,6 +374,7 @@ static void saveKeyList() {
 
 static void saveKey(KeyDef const& k) {
     auto m = Mod::get();
+    m->setSavedValue<std::string>(kf(k.id, "text"), k.text);
     m->setSavedValue<std::string>(kf(k.id, "style"), encodeStyle(k.style));
     m->setSavedValue<int64_t>(kf(k.id, "map"), k.map);
     m->setSavedValue<double>(kf(k.id, "x"), k.x);
@@ -368,6 +394,7 @@ static KeyDef loadKey(int id) {
     auto m = Mod::get();
     KeyDef k;
     k.id = id;
+    k.text = m->getSavedValue<std::string>(kf(id, "text"), "");
     k.style = decodeStyle(m->getSavedValue<std::string>(kf(id, "style"), ""));
     k.map = static_cast<int>(m->getSavedValue<int64_t>(kf(id, "map"), 0));
     k.x = static_cast<float>(m->getSavedValue<double>(kf(id, "x"), 0.0));
@@ -439,6 +466,25 @@ static Look lookForKey(Look const& base, KeyDef const& k) {
     kl.borderW = k.borderW;
     if (k.radius >= 0.f) kl.radius = k.radius / 100.f;
     for (auto const& [key, v] : k.style) {
+        if (key == "key-code") kl.keyCode = static_cast<int>(std::clamp(v, 0., 65535.));
+        if (key == "label-font") kl.labelFont = static_cast<int>(std::clamp(v, 0., 3.));
+        if (key == "label-size") kl.labelSize = static_cast<float>(std::clamp(v, 4., 40.));
+        if (key == "label-color") kl.labelColor = static_cast<int>(std::clamp(v, 0., 16777215.));
+        if (key == "note-auto-y") kl.noteAutoY = v != 0;
+        if (key == "count-area") kl.countArea = static_cast<int>(std::clamp(v, 0., 1.));
+        if (key == "count-direction") kl.countDirection = static_cast<int>(std::clamp(v, 0., 3.));
+        if (key == "count-align") kl.countAlign = static_cast<int>(std::clamp(v, 0., 2.));
+        if (key == "count-gap") kl.countGap = static_cast<float>(std::clamp(v, 0., 40.));
+        if (key == "count-fill") kl.countFill = v != 0;
+        if (key == "count-color") kl.countColor = static_cast<int>(std::clamp(v, 0., 16777215.));
+        if (key == "count-stroke") kl.countOutline = static_cast<float>(std::clamp(v, 0., 4.));
+        if (key == "count-stroke-color") kl.countOutlineColor = unpackC(static_cast<int>(std::clamp(v, 0., 16777215.)));
+        if (key == "count-font") kl.countFont = static_cast<int>(std::clamp(v, 0., 3.));
+        if (key == "count-size") kl.countSize = static_cast<float>(std::clamp(v, 4., 40.));
+        if (key == "count-motion") kl.countMotion = v != 0;
+        if (key == "count-motion-type") kl.countMotionType = v != 0;
+        if (key == "count-motion-amount") kl.countMotionAmount = static_cast<float>(std::clamp(v, 0., 100.));
+        if (key == "count-motion-time") kl.countMotionTime = static_cast<float>(std::clamp(v, 0.05, 1.0));
         if (key == "note-width") kl.noteWidth = static_cast<float>(std::clamp(v, 20.0, 100.0)) / 100.f;
         if (key == "note-min-length") kl.noteMin = static_cast<float>(std::clamp(v, 2.0, 60.0));
         if (key == "note-speed") kl.noteSpeed = static_cast<float>(std::clamp(v, 100.0, 600.0));
@@ -466,8 +512,16 @@ static Look lookForKey(Look const& base, KeyDef const& k) {
     return kl;
 }
 
+static std::string keyName(int code) {
+    auto name = CCDirector::get()->getKeyboardDispatcher()->keyToString(static_cast<enumKeyCodes>(code));
+    return name && *name ? name : std::to_string(code);
+}
+
 static std::string labelFor(KeyDef const& k, Look const& l) {
+    if (!k.text.empty()) return k.text;
     if (k.label > 0 && k.label < kLabelCount) return kLabels[k.label];
+    if (auto it = k.style.find("key-code"); it != k.style.end() && it->second > 0)
+        return keyName(static_cast<int>(std::clamp(it->second, 1., 65535.)));
     switch (k.map) {
         case 0: return l.labelJump;
         case 1: return l.labelLeft;
@@ -492,7 +546,7 @@ struct SetDef {
 };
 
 static SetDef const kSetDefs[] = {
-    {"show-timeline", SetType::Bool}, {"show-counter", SetType::Bool}, {"show-kps", SetType::Bool},
+    {"show-viewer", SetType::Bool}, {"show-timeline", SetType::Bool}, {"show-counter", SetType::Bool}, {"show-kps", SetType::Bool},
     {"show-total", SetType::Bool}, {"show-glow", SetType::Bool}, {"note-glow", SetType::Bool},
     {"reset-on-restart", SetType::Bool},
     {"box-size", SetType::Num}, {"jump-width", SetType::Num}, {"corner-radius", SetType::Num},
@@ -528,31 +582,18 @@ static std::string serializePreset() {
         out += "K," + std::to_string(k.id) + "," + std::to_string(k.map) + "," + numStr(k.x) + "," +
                numStr(k.y) + "," + numStr(k.w) + "," + numStr(k.h) + "," + std::to_string(k.bg) + "," +
                std::to_string(k.pressed) + "," + std::to_string(k.border) + "," + std::to_string(k.accent) + "," +
-               numStr(k.borderW) + "," + numStr(k.radius) + "," + std::to_string(k.label) + "," + encodeStyle(k.style) + ";";
+               numStr(k.borderW) + "," + numStr(k.radius) + "," + std::to_string(k.label) + "," + encodeStyle(k.style) + "," + cleanStr(k.text) + ";";
     }
     return out;
 }
 
-static void applyPresetData(std::string const& data) {
+static bool applyPresetData(std::string const& data) {
     auto m = Mod::get();
     std::vector<KeyDef> keys;
     for (auto const& rec : splitStr(data, ';')) {
         if (rec.empty()) continue;
         auto f = splitStr(rec, ',');
-        if (f[0] == "S" && f.size() >= 3) {
-            for (auto const& d : kSetDefs) {
-                if (f[1] != d.key) continue;
-                std::string k = d.key;
-                switch (d.type) {
-                    case SetType::Bool: m->setSettingValue<bool>(k, f[2] == "1"); break;
-                    case SetType::Num: m->setSettingValue<double>(k, std::atof(f[2].c_str())); break;
-                    case SetType::Int: m->setSettingValue<int64_t>(k, std::atoll(f[2].c_str())); break;
-                    case SetType::Color: m->setSettingValue<ccColor3B>(k, unpackC(std::atoi(f[2].c_str()))); break;
-                    case SetType::Str: m->setSettingValue<std::string>(k, f[2]); break;
-                }
-                break;
-            }
-        } else if (f[0] == "K" && f.size() >= 14) {
+        if (f[0] == "K" && f.size() >= 14) {
             KeyDef k;
             k.id = std::atoi(f[1].c_str());
             k.map = std::clamp(std::atoi(f[2].c_str()), 0, 5);
@@ -568,15 +609,40 @@ static void applyPresetData(std::string const& data) {
             k.radius = static_cast<float>(std::atof(f[12].c_str()));
             k.label = std::clamp(std::atoi(f[13].c_str()), 0, kLabelCount - 1);
             if (f.size() >= 15) k.style = decodeStyle(f[14]);
+            if (f.size() >= 16) k.text = f[15].substr(0, 24);
+            if (k.id < 0 || k.id == INT32_MAX || !std::isfinite(k.x) || !std::isfinite(k.y) ||
+                !std::isfinite(k.w) || !std::isfinite(k.h) ||
+                std::any_of(keys.begin(), keys.end(), [&](KeyDef const& prior) { return prior.id == k.id; }))
+                return false;
             keys.push_back(k);
         }
     }
-    if (!keys.empty()) {
+    if (keys.empty()) return false;
+    for (auto const& record : splitStr(data, ';')) {
+        auto f = splitStr(record, ',');
+        if (f[0] == "S" && f.size() >= 3) {
+            for (auto const& d : kSetDefs) {
+                if (f[1] != d.key) continue;
+                std::string k = d.key;
+                switch (d.type) {
+                    case SetType::Bool: m->setSettingValue<bool>(k, f[2] == "1"); break;
+                    case SetType::Num: m->setSettingValue<double>(k, std::atof(f[2].c_str())); break;
+                    case SetType::Int: m->setSettingValue<int64_t>(k, std::atoll(f[2].c_str())); break;
+                    case SetType::Color: m->setSettingValue<ccColor3B>(k, unpackC(std::atoi(f[2].c_str()))); break;
+                    case SetType::Str: m->setSettingValue<std::string>(k, f[2]); break;
+                }
+                break;
+            }
+        }
+    }
+    {
+
         g_keys = keys;
         for (auto const& k : g_keys) g_nextId = std::max(g_nextId, k.id + 1);
         saveKeyList();
         for (auto const& k : g_keys) saveKey(k);
     }
+    return true;
 }
 
 static int presetCount() {
@@ -618,6 +684,20 @@ static void presetDelete(int i) {
 // ---------------------------------------------------------------
 // 노트 하나가 쓰는 이미지 3장 (글로우, 본체, 색 그라데이션)
 // ---------------------------------------------------------------
+static std::array<char const*, 4> const kFonts = {
+    "InterBold.fnt"_spr, "ViewerUI.fnt"_spr, "bigFont.fnt", "goldFont.fnt"
+};
+
+static void setFont(CCLabelBMFont* label, int font) {
+    auto file = kFonts[font];
+    if (std::string_view(label->getFntFile()) != file) label->setFntFile(file);
+}
+
+static float labelScale(CCLabelBMFont* label, float height, float maxWidth) {
+    auto size = label->getContentSize();
+    return std::min(height / std::max(1.f, size.height), maxWidth / std::max(1.f, size.width));
+}
+
 struct NoteSprites {
     CCScale9Sprite* glow = nullptr;
     CCScale9Sprite* base = nullptr;
@@ -641,6 +721,10 @@ protected:
     bool m_dirty = true;
     int m_presses = 0;
     float m_w = 0.f, m_h = 0.f;
+    std::array<CCLabelBMFont*, 8> m_countOutline{};
+    double m_countStart = -1.0;
+    float m_noteSpace = 0.f;
+    float m_noteStart = 0.f;
     float m_press = 0.f; // 0 = 평소, 1 = 눌림 (부드럽게 변함)
     float m_lw = -1.f, m_lh = -1.f, m_ls = -1.f;
     Look m_look;
@@ -680,7 +764,11 @@ protected:
         this->addChild(m_name, 3);
 
         m_count = CCLabelBMFont::create("0", "InterBold.fnt"_spr);
-        this->addChild(m_count, 3);
+        for (auto& border : m_countOutline) {
+            border = CCLabelBMFont::create("0", kFonts[0]);
+            this->addChild(border, 3);
+        }
+        this->addChild(m_count, 4);
         return true;
     }
 
@@ -713,13 +801,50 @@ protected:
         m_pool.push_back(s);
     }
 
-    void fitCount() {
-        float f = m_h / 46.f;
-        float countScale = 0.34f * f;
-        m_count->setScale(countScale);
-        float cw = m_count->getContentSize().width * countScale;
-        float maxW = m_w * 0.84f;
-        if (cw > maxW && cw > 0.f) m_count->setScale(countScale * maxW / cw);
+    void fitCount(double now = nowSec()) {
+        const bool outside = m_look.countArea == 1;
+        float scale = labelScale(m_count, m_look.countSize, outside ? 400.f : m_w * 0.84f);
+        float width = m_count->getContentSize().width * scale;
+        float height = m_count->getContentSize().height * scale;
+        float t = static_cast<float>((now - m_countStart) / m_look.countMotionTime);
+        float motion = m_look.countMotion && m_countStart >= 0.0 && t >= 0.f && t < 1.f
+            ? m_look.countMotionAmount / 100.f * (1.f - t) : 0.f;
+        if (m_look.countMotionType == 0) scale *= 1.f + motion;
+        float gap = m_look.countGap;
+        float align = m_look.countAlign * 0.5f;
+        float x = width / 2 + (m_w - width) * align;
+        float y = m_h * 0.27f;
+        if (m_look.countDirection <= 1) {
+            if (outside) y = m_look.countDirection == 0 ? -gap - height / 2 : m_h + gap + height / 2;
+            else if (m_look.countDirection == 1) y = m_h * 0.73f;
+        } else {
+            const bool left = m_look.countDirection == 2;
+            x = left ? width / 2 + gap : m_w - width / 2 - gap;
+            if (outside) x = left ? -width / 2 - gap : m_w + width / 2 + gap;
+            y = height / 2 + (m_h - height) * align;
+        }
+        if (m_look.countMotionType == 1) y += 16.f * motion;
+        m_count->setPosition({x, y});
+        m_count->setScale(scale);
+        m_count->setVisible(m_look.counter && m_look.countFill);
+        for (size_t i = 0; i < m_countOutline.size(); ++i) {
+            auto border = m_countOutline[i];
+            float angle = i * kPi / 4.f;
+            float offset = m_look.countOutline;
+            border->setPosition({x + std::cos(angle) * offset, y + std::sin(angle) * offset});
+            border->setScale(scale);
+            border->setVisible(m_look.counter && offset > 0.f);
+        }
+        m_noteStart = m_h + 5.f;
+        if (m_look.noteAutoY && m_look.counter && outside && m_look.countDirection == 1 &&
+            (m_look.countFill || m_look.countOutline > 0))
+            m_noteStart = std::max(m_noteStart, y + height / 2 + m_look.countOutline + 5.f);
+    }
+
+    void setCountText() {
+        auto text = std::to_string(m_presses);
+        m_count->setString(text.c_str());
+        for (auto border : m_countOutline) border->setString(text.c_str());
     }
 
     void drawBorder() {
@@ -758,8 +883,11 @@ protected:
         ccColor3B idleText = m_look.tileOpacity < 128 ? ccColor3B{255, 255, 255} : textFor(m_look.tile);
         ccColor3B text = lerpC(idleText, textFor(pressBg), p);
         ccColor3B bg = lerpC(m_look.tile, pressBg, p);
-        m_name->setColor(text);
-        m_count->setColor(lerpC(text, bg, 0.45f));
+        m_name->setColor(m_look.labelColor < 0 ? text : unpackC(m_look.labelColor));
+        m_count->setColor(m_look.countColor < 0
+            ? (m_look.countArea == 0 ? lerpC(text, bg, 0.45f) : ccColor3B{255, 255, 255})
+            : unpackC(m_look.countColor));
+        for (auto border : m_countOutline) border->setColor(m_look.countOutlineColor);
     }
 
 public:
@@ -797,18 +925,17 @@ public:
         placeCenter(m_tileGrad, 0.f, 0.f, m_w, m_h);
         placeCenter(m_glow, -kGlowPad, -kGlowPad, m_w + 2 * kGlowPad, m_h + 2 * kGlowPad);
 
-        float f = m_h / 46.f;
-        float maxW = m_w * 0.84f;
-
-        float nameScale = 0.50f * f;
-        m_name->setScale(nameScale);
-        float nw = m_name->getContentSize().width * nameScale;
-        if (nw > maxW && nw > 0.f) m_name->setScale(nameScale * maxW / nw);
-        m_name->setPosition({m_w / 2, l.counter ? m_h * 0.62f : m_h / 2});
-
-        m_count->setVisible(l.counter);
+        setFont(m_name, l.labelFont);
+        setFont(m_count, l.countFont);
+        for (auto border : m_countOutline) setFont(border, l.countFont);
+        m_name->setScale(labelScale(m_name, l.labelSize, m_w * 0.84f));
+        float labelY = m_h / 2.f;
+        if (l.counter && l.countArea == 0 && (l.countFill || l.countOutline > 0)) {
+            if (l.countDirection == 0) labelY = m_h * 0.65f;
+            if (l.countDirection == 1) labelY = m_h * 0.35f;
+        }
+        m_name->setPosition({m_w / 2, labelY});
         this->fitCount();
-        m_count->setPosition({m_w / 2, m_h * 0.27f});
 
         this->drawBorder();
         m_dirty = true;
@@ -820,8 +947,9 @@ public:
         if (down) {
             m_held |= bit;
             ++m_presses;
-            m_count->setString(std::to_string(m_presses).c_str());
-            this->fitCount();
+            m_countStart = t;
+            setCountText();
+            fitCount(t);
             if (drawNotes && m_look.timeline) {
                 Note n;
                 n.source = source;
@@ -847,8 +975,9 @@ public:
 
     void resetCount() {
         m_presses = 0;
-        m_count->setString("0");
-        this->fitCount();
+        m_countStart = -1.0;
+        setCountText();
+        fitCount();
     }
 
     void clearNotes() {
@@ -865,7 +994,12 @@ public:
             return;
         }
 
-        float H = std::max(20.f, m_look.noteHeight);
+        float H = m_look.noteHeight;
+        if (m_look.noteAutoY) H = std::clamp(m_noteSpace - m_noteStart, 0.f, H);
+        if (H < kCap) {
+            clearNotes();
+            return;
+        }
         float sp = m_look.noteSpeed;
         float minLen = std::max(kCap, m_look.noteMin);
 
@@ -878,7 +1012,7 @@ public:
             }
         }
 
-        float baseY = m_h + 5.f;
+        float baseY = m_noteStart;
         float nw = std::max(kCap, std::clamp(m_look.noteWidth, 0.2f, 1.f) * m_w);
         float x0 = (m_w - nw) / 2.f;
         float noteR = std::clamp(m_look.noteRadius * nw, 1.5f, 16.f);
@@ -946,7 +1080,14 @@ public:
         }
     }
 
-    void tick(double now, float dt) {
+    int keyCode() const { return m_look.keyCode; }
+
+    void tick(double now, float dt, float noteSpace) {
+        m_noteSpace = noteSpace;
+        if (m_look.countMotion && m_countStart >= 0.0) {
+            fitCount(now);
+            if (now - m_countStart >= m_look.countMotionTime) m_countStart = -1.0;
+        }
         float target = m_held ? 1.f : 0.f;
         float rate = m_held ? 40.f : 14.f;
         float old = m_press;
@@ -986,6 +1127,7 @@ protected:
     std::string m_infoStr;
     std::deque<double> m_hits;
     unsigned m_heldSources = 0;
+    std::set<int> m_heldKeys;
     bool m_koreanStats = false;
     int m_total = 0;
     int m_peak = 0;
@@ -1051,7 +1193,7 @@ protected:
         std::vector<KeyLane*> out;
         for (auto const& k : g_keys) {
             if (k.map != map) continue;
-            if (auto lane = laneFor(k.id)) out.push_back(lane);
+            if (auto lane = laneFor(k.id); lane && lane->keyCode() == 0) out.push_back(lane);
         }
         return out;
     }
@@ -1147,9 +1289,8 @@ public:
             if (!lane) continue;
 
             // 왼쪽/오른쪽 키는 플랫포머 레벨에서만 보인다
-            bool vis = m_platformer || (k.map % 3 == 0);
+            bool vis = k.style.contains("key-code") || m_platformer || (k.map % 3 == 0);
             lane->setVisible(vis);
-            if (!vis) continue;
 
             float w = k.w > 0.5f ? k.w : autoWidth(k, m_look);
             float h = k.h > 0.5f ? k.h : m_look.size;
@@ -1157,6 +1298,7 @@ public:
             lane->setName(name);
             lane->layout(lookForKey(m_look, k), w, h);
             lane->setPosition({k.x, k.y});
+            if (!vis) continue;
 
             LaneGeo g;
             g.id = k.id;
@@ -1211,10 +1353,35 @@ public:
         ++m_total;
     }
 
-    void onRestart() {
+    void onKeyboard(int code, bool down) {
+        double t = nowSec();
+        if (down) {
+            if (!m_heldKeys.insert(code).second) return;
+            bool used = false;
+            for (auto& r : m_lanes) {
+                if (r.lane->keyCode() != code || !r.lane->isVisible()) continue;
+                r.lane->input(6, true, t, m_look.viewerVisible);
+                used = true;
+            }
+            if (used) {
+                m_hits.push_back(t);
+                ++m_total;
+            }
+        } else if (m_heldKeys.erase(code)) {
+            for (auto& r : m_lanes)
+                if (r.lane->keyCode() == code) r.lane->input(6, false, t, false);
+        }
+    }
+
+    void resetInput() {
         m_heldSources = 0;
+        m_heldKeys.clear();
+        for (auto& r : m_lanes) r.lane->resetInput();
+    }
+
+    void onRestart() {
+        resetInput();
         for (auto& r : m_lanes) {
-            r.lane->resetInput();
             if (m_look.resetOnRestart) r.lane->resetCount();
         }
         if (m_look.resetOnRestart) {
@@ -1241,6 +1408,7 @@ public:
             if (auto scene = CCDirector::get()->getRunningScene()) {
                 paused = scene->getChildByType<PauseLayer>(0) != nullptr;
             }
+            if (paused && !m_editing) resetInput();
             this->setEditing(paused);
         }
 
@@ -1251,7 +1419,9 @@ public:
         m_peak = std::max(m_peak, kps);
 
         if (!m_look.viewerVisible) return;
-        for (auto& r : m_lanes) if (r.lane->isVisible()) r.lane->tick(now, dt);
+        float top = CCDirector::get()->getWinSize().height - getPositionY();
+        for (auto& r : m_lanes)
+            if (r.lane->isVisible()) r.lane->tick(now, dt, top - r.lane->getPositionY());
 
         std::string s;
         if (m_look.kps) s += "KPS " + std::to_string(kps) + (m_koreanStats ? "  최고 " : "  MAX ") + std::to_string(m_peak);
@@ -1305,6 +1475,70 @@ struct View {
     float ox = 0.f, oy = 0.f, sc = 1.f;
 };
 
+class EditorInputPopup : public geode::Popup {
+    using Action = std::function<bool(std::string const&)>;
+    Action m_apply;
+    std::function<void()> m_dismiss;
+    geode::TextInput* m_field = nullptr;
+    CCLabelBMFont* m_hint = nullptr;
+    std::function<void(int)> m_capture;
+
+    void onClose(CCObject* sender) override {
+        if (m_dismiss) {
+            auto dismiss = std::move(m_dismiss);
+            dismiss();
+        }
+        Popup::onClose(sender);
+    }
+
+    void onApply(CCObject* sender) {
+        if (m_apply(m_field->getString().c_str())) onClose(sender);
+        else m_hint->setString(uiText("Enter a valid value.").c_str());
+    }
+
+    void keyDown(enumKeyCodes key, double time) override {
+        if (m_capture && key != KEY_Escape && static_cast<int>(key) > 0) {
+            m_capture(static_cast<int>(key));
+            onClose(nullptr);
+            return;
+        }
+        Popup::keyDown(key, time);
+    }
+
+public:
+    static EditorInputPopup* create(std::string title, std::string value, bool numeric, Action apply,
+                                     std::function<void(int)> capture, std::function<void()> dismiss) {
+        auto popup = new EditorInputPopup;
+        if (!popup->Popup::init(240.f, 118.f)) {
+            delete popup;
+            return nullptr;
+        }
+        popup->m_apply = std::move(apply);
+        popup->m_capture = std::move(capture);
+        popup->m_dismiss = std::move(dismiss);
+        mkLabel(popup->m_mainLayer, title, 0.52f, kWhite, {120.f, 94.f}, 0.5f);
+        if (popup->m_capture) {
+            popup->setKeyboardEnabled(true);
+            mkLabel(popup->m_mainLayer, "Press a keyboard key", 0.42f, kWhite, {120.f, 55.f}, 0.5f);
+        } else {
+            popup->m_field = geode::TextInput::create(172.f, "");
+            popup->m_field->setPosition({120.f, 64.f});
+            popup->m_field->setMaxCharCount(numeric ? 9 : 24);
+            popup->m_field->setFilter(numeric ? "0123456789-." : "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 !#$%&()+-./:<=>?@[]_");
+            popup->m_field->setString(value.c_str());
+            popup->m_mainLayer->addChild(popup->m_field);
+            popup->m_hint = mkLabel(popup->m_mainLayer, "", 0.30f, kWhite, {120.f, 41.f}, 0.5f);
+            auto sprite = ButtonSprite::create("OK");
+            sprite->setScale(0.65f);
+            auto confirm = CCMenuItemSpriteExtra::create(sprite, popup, menu_selector(EditorInputPopup::onApply));
+            confirm->setPosition({120.f, 20.f});
+            popup->m_buttonMenu->addChild(confirm);
+        }
+        popup->autorelease();
+        return popup;
+    }
+};
+
 class KVEditor : public CCLayer {
 protected:
     KeyViewer* m_viewer = nullptr;
@@ -1323,6 +1557,7 @@ protected:
     bool m_reloadLanguage = false;
     bool m_mapMode = false;
     bool m_pendingRebuild = false;
+    bool m_modal = false;
 
     CCDrawNode* m_back = nullptr;
     CCDrawNode* m_chrome = nullptr;
@@ -1357,6 +1592,7 @@ protected:
         if (!CCLayer::init()) return false;
         m_viewer = viewer;
         this->setTouchEnabled(true);
+        this->setMouseEnabled(true);
 
         auto win = CCDirector::get()->getWinSize();
         W = win.width;
@@ -1372,7 +1608,7 @@ protected:
         tabY0 = inY1 - 22.f;
         vpY1 = tabY0 - 4.f;
         vpY0 = inY0 + 4.f;
-        m_inW = inW - 12.f;
+        m_inW = inW - 18.f;
 
         m_back = CCDrawNode::create();
         this->addChild(m_back, 0);
@@ -1382,8 +1618,13 @@ protected:
         this->addChild(m_canvas, 2);
         m_canvasLabels = CCNode::create();
         this->addChild(m_canvasLabels, 3);
+        auto clip = CCClippingNode::create();
+        auto stencil = CCDrawNode::create();
+        dnRect(stencil, inX0, vpY0, inX1, vpY1, {255, 255, 255}, 1.f);
+        clip->setStencil(stencil);
+        this->addChild(clip, 4);
         m_content = CCNode::create();
-        this->addChild(m_content, 4);
+        clip->addChild(m_content);
         m_content->setPosition({inX0 + 6.f, vpY1});
         m_bar = CCDrawNode::create();
         this->addChild(m_bar, 5);
@@ -1583,7 +1824,9 @@ protected:
     }
 
     void setStatus(std::string const& s) {
-        if (m_status) m_status->setString(uiText(s).c_str());
+        if (!m_status) return;
+        m_status->setString(uiText(s).c_str());
+        m_status->setScale(std::min(0.26f, (cvX1 - cvX0 - 12.f) / std::max(1.f, m_status->getContentSize().width)));
     }
 
     void ensureSelection() {
@@ -1689,6 +1932,7 @@ protected:
         KeyDef d;
         d.id = k->id;
         d.map = k->map;
+        if (auto it = k->style.find("key-code"); it != k->style.end()) d.style.insert(*it);
         d.x = k->x;
         d.y = k->y;
         *k = d;
@@ -1825,12 +2069,13 @@ protected:
 
             auto lab = this->tileLabel(li++);
             if (lab) {
+                setFont(lab, kl.labelFont);
                 lab->setString(g.name.c_str());
-                float sc = 0.5f * (h / 46.f);
+                float sc = labelScale(lab, kl.labelSize * v.sc, w * 0.84f);
                 lab->setScale(sc);
                 float lw = lab->getContentSize().width * sc;
                 if (lw > w * 0.84f && lw > 0.f) lab->setScale(sc * w * 0.84f / lw);
-                lab->setColor(textFor(fill));
+                lab->setColor(kl.labelColor < 0 ? textFor(fill) : unpackC(kl.labelColor));
                 lab->setPosition({(x0 + x1) / 2.f, (y0 + y1) / 2.f});
                 lab->setVisible(true);
             }
@@ -1967,7 +2212,8 @@ protected:
 
     void rowInfo(std::string const& text) {
         int ri = beginRow(18.f);
-        rowLabel(ri, text, 0.f, m_rows[ri].top - 9.f, 0.28f, ccColor3B{170, 170, 190}, 0.f);
+        if (auto label = rowLabel(ri, text, 0.f, m_rows[ri].top - 9.f, 0.28f, {170, 170, 190}, 0.f))
+            label->setScale(std::min(0.28f, m_inW / std::max(1.f, label->getContentSize().width)));
     }
 
     void rowButton(std::string const& label, ccColor3B color, std::function<void()> action) {
@@ -2212,7 +2458,7 @@ protected:
         float top = m_rows[ri].top;
         float w = m_inW;
         auto d = rowDraw(ri);
-        float bw = 32.f, bh = 18.f;
+        float bw = std::min(32.f, w * 0.22f), bh = 18.f;
         float y0 = top - 23.f, y1 = y0 + bh;
         float xs[3] = {w - 3.f * bw - 4.f, w - 2.f * bw - 2.f, w - bw};
         char const* names[3] = {"LOAD", "SAVE", "DEL"};
@@ -2220,22 +2466,28 @@ protected:
 
         std::function<void()> actions[3];
         actions[0] = [this, i]() {
-            applyPresetData(presetData(i));
+            if (!applyPresetData(presetData(i))) {
+                setStatus("Invalid preset.");
+                return;
+            }
+            m_viewer->resetInput();
+            bool persisted = Mod::get()->saveData().isOk();
             m_viewer->applyLook();
             this->ensureSelection();
             this->redrawCanvas();
             m_pendingRebuild = true;
-            this->setStatus(uiText("Loaded ") + presetName(i));
+            this->setStatus(persisted ? uiText("Loaded ") + presetName(i) : uiText("Preset storage failed."));
+            redrawChrome();
         };
         actions[1] = [this, i]() {
             presetSetData(i, serializePreset());
-            this->setStatus(uiText("Saved over ") + presetName(i));
+            this->setStatus(Mod::get()->saveData().isOk() ? uiText("Saved over ") + presetName(i) : uiText("Preset storage failed."));
         };
         actions[2] = [this, i]() {
             std::string n = presetName(i);
             presetDelete(i);
             m_pendingRebuild = true;
-            this->setStatus(uiText("Deleted ") + n);
+            this->setStatus(Mod::get()->saveData().isOk() ? uiText("Deleted ") + n : uiText("Preset storage failed."));
         };
 
         for (int k = 0; k < 3; k++) {
@@ -2259,7 +2511,7 @@ protected:
     }
 
     // 전체 설정(모드 설정)과 연결된 슬라이더, 스위치, 색
-    int styleKey() const { return m_tab <= 1 ? m_sel : -1; }
+    int styleKey() const { return m_tab <= 2 ? m_sel : -1; }
 
     static double styleValue(int id, std::string const& key, double fallback) {
         if (auto k = keyById(id)) {
@@ -2319,6 +2571,82 @@ protected:
             id >= 0);
     }
 
+    void showInput(std::string title, std::string value, bool numeric,
+                   std::function<bool(std::string const&)> apply, std::function<void(int)> capture = {}) {
+        auto popup = EditorInputPopup::create(std::move(title), std::move(value), numeric, std::move(apply),
+            std::move(capture), [this] { m_modal = false; m_pendingRebuild = true; });
+        if (popup) {
+            m_modal = true;
+            popup->show();
+        }
+    }
+
+    void geometryRow(std::string const& title, std::array<char const*, 2> const& names, int id,
+                     std::array<float KeyDef::*, 2> const& fields,
+                     std::array<float, 2> const& low, std::array<float, 2> const& high) {
+        int row = beginRow(44.f);
+        float top = m_rows[row].top;
+        rowLabel(row, title, 0.f, top - 8.f, 0.30f, kWhite, 0.f);
+        auto bg = rowDraw(row);
+        float width = (m_inW - 4.f) / 2.f;
+        for (size_t i = 0; i < fields.size(); ++i) {
+            auto key = keyById(id);
+            if (!key) return;
+            float x = i * (width + 4.f);
+            dnRound(bg, x, top - 39.f, x + width, top - 17.f, 4.f, {58, 58, 72}, 1.f, 3);
+            std::string label = std::string(names[i]) + "  " + fmtNum(key->*fields[i]);
+            rowLabel(row, label, x + width / 2.f, top - 28.f, 0.32f, kWhite, 0.5f);
+            Ctl ctl;
+            ctl.row = row;
+            ctl.r = CCRect(x, top - 39.f, width, 22.f);
+            ctl.down = [this, id, field = fields[i], min = low[i], max = high[i], name = std::string(names[i])](CCPoint) {
+                auto key = keyById(id);
+                if (!key) return;
+                showInput(name, fmtNum(key->*field), true, [this, id, field, min, max](std::string const& input) {
+                    char* end = nullptr;
+                    float value = std::strtof(input.c_str(), &end);
+                    if (end == input.c_str() || *end || !std::isfinite(value) || value < min || value > max)
+                        return false;
+                    if (auto key = keyById(id)) {
+                        key->*field = value;
+                        commitKey(id);
+                    }
+                    return true;
+                });
+            };
+            m_scrollCtls.push_back(ctl);
+        }
+    }
+
+    void localSlider(std::string const& label, std::string const& style, float low, float high, float step, float base) {
+        int id = m_sel;
+        rowSlider(label, low, high, step,
+            [id, style, base] { return static_cast<float>(styleValue(id, style, base)); },
+            [this, id, style](float value) { writeStyle(id, style, value); });
+    }
+
+    void localToggle(std::string const& label, std::string const& style, bool base) {
+        int id = m_sel;
+        rowToggle(label, [id, style, base] { return styleValue(id, style, base) != 0; },
+            [this, id, style](bool value) { writeStyle(id, style, value); });
+    }
+
+    void localChoice(std::string const& label, std::string const& style, std::vector<std::string> choices, int base) {
+        int id = m_sel;
+        rowCycle(label, std::move(choices), [id, style, base] { return static_cast<int>(styleValue(id, style, base)); },
+            [this, id, style](int value) { writeStyle(id, style, value); });
+    }
+
+    void localColor(std::string const& label, std::string const& style, int base, bool autoColor) {
+        int id = m_sel;
+        rowColor(label, [id, style, base] { return static_cast<int>(styleValue(id, style, base)); },
+            [this, id, style](int value) { writeStyle(id, style, value); }, autoColor);
+    }
+
+    void fontChoice(std::string const& style) {
+        localChoice("Font", style, {"Inter", "Noto Sans", "GD Big", "GD Gold"}, 0);
+    }
+
     void buildKeyTab() {
         int id = m_sel;
         {
@@ -2352,19 +2680,36 @@ protected:
                 if (auto k = keyById(id)) k->label = std::clamp(v, 0, kLabelCount - 1);
                 this->commitKey(id);
             });
-        rowSlider("Position X", -500.f, 500.f, 1.f,
-            [id]() { auto k = keyById(id); return k ? k->x : 0.f; },
-            [this, id](float v) { if (auto k = keyById(id)) k->x = v; this->commitKey(id); });
-        rowSlider("Position Y", -300.f, 300.f, 1.f,
-            [id]() { auto k = keyById(id); return k ? k->y : 0.f; },
-            [this, id](float v) { if (auto k = keyById(id)) k->y = v; this->commitKey(id); });
-        auto autoFmt = [](float v) { return v < 0.5f ? std::string("AUTO") : fmtNum(v); };
-        rowSlider("Width", 0.f, 160.f, 1.f,
-            [id]() { auto k = keyById(id); return k ? k->w : 0.f; },
-            [this, id](float v) { if (auto k = keyById(id)) k->w = v; this->commitKey(id); }, autoFmt);
-        rowSlider("Height", 0.f, 160.f, 1.f,
-            [id]() { auto k = keyById(id); return k ? k->h : 0.f; },
-            [this, id](float v) { if (auto k = keyById(id)) k->h = v; this->commitKey(id); }, autoFmt);
+        auto key = keyById(id);
+        if (!key) return;
+        int code = lookForKey(readLook(), *key).keyCode;
+        rowInfo(code ? uiText("Bound key ") + keyName(code) : uiText("Game action input"));
+        rowButton("Bind keyboard key", {70, 110, 240}, [this, id] {
+            showInput("Bind keyboard key", "", false, {}, [this, id](int code) {
+                m_viewer->resetInput();
+                writeStyle(id, "key-code", code);
+            });
+        });
+        if (code) rowButton("Use game action", {58, 58, 72}, [this, id] {
+            m_viewer->resetInput();
+            writeStyle(id, "key-code", -1);
+            m_pendingRebuild = true;
+        });
+        geometryRow("Position", {"X", "Y"}, id, {&KeyDef::x, &KeyDef::y}, {-500.f, -300.f}, {500.f, 300.f});
+        geometryRow("Size", {"W", "H"}, id, {&KeyDef::w, &KeyDef::h}, {0.f, 0.f}, {500.f, 500.f});
+        rowInfo("Size 0 uses the default.");
+        rowButton(key->text.empty() ? "Set custom text" : uiText("Text ") + key->text, {58, 58, 72}, [this, id] {
+            if (auto key = keyById(id)) showInput("Set custom text", key->text, false, [this, id](std::string const& text) {
+                if (auto k = keyById(id)) {
+                    k->text = cleanStr(text.substr(0, 24));
+                    commitKey(id);
+                }
+                return true;
+            });
+        });
+        fontChoice("label-font");
+        localSlider("Font size", "label-size", 4.f, 40.f, 1.f, 10.f);
+        localColor("Font color", "label-color", -1, true);
         float gr = readLook().radius * 100.f;
         rowSlider("Rounding %", 0.f, 50.f, 1.f,
             [id, gr]() { auto k = keyById(id); return (k && k->radius >= 0.f) ? k->radius : gr; },
@@ -2398,6 +2743,7 @@ protected:
             [id]() { auto k = keyById(id); return k ? k->accent : -1; },
             [this, id](int v) { if (auto k = keyById(id)) k->accent = v; this->commitKey(id); }, true);
         this->settingToggle("Note timeline", "show-timeline");
+        localToggle("Auto Y correction", "note-auto-y", false);
         this->settingToggle("Note glow", "note-glow");
         this->settingSlider("Note width %", "note-width", 20.f, 100.f, 1.f);
         this->settingSlider("Min length", "note-min-length", 2.f, 60.f, 1.f);
@@ -2425,10 +2771,22 @@ protected:
     }
 
     void buildCounterTab() {
-        this->settingToggle("Key counters", "show-counter");
-        this->settingToggle("KPS", "show-kps");
-        this->settingToggle("Total presses", "show-total");
-        this->settingToggle("Reset on restart", "reset-on-restart");
+        rowInfo(uiText("Selected counter ") + describeKey(m_sel));
+        settingToggle("Key counters", "show-counter");
+        localChoice("Placement", "count-area", {"Inside", "Outside"}, 0);
+        localChoice("Direction", "count-direction", {"Below", "Above", "Left", "Right"}, 0);
+        localChoice("Alignment", "count-align", {"Start", "Center", "End"}, 1);
+        localSlider("Spacing", "count-gap", 0.f, 40.f, 1.f, 3.f);
+        localToggle("Fill", "count-fill", true);
+        localColor("Fill color", "count-color", -1, true);
+        localSlider("Outline thickness", "count-stroke", 0.f, 4.f, 0.25f, 0.f);
+        localColor("Outline color", "count-stroke-color", 0, false);
+        fontChoice("count-font");
+        localSlider("Font size", "count-size", 4.f, 40.f, 1.f, 7.f);
+        localToggle("Counter animation", "count-motion", false);
+        localChoice("Motion", "count-motion-type", {"Pulse", "Bounce"}, 0);
+        localSlider("Motion amount %", "count-motion-amount", 0.f, 100.f, 5.f, 25.f);
+        localSlider("Motion time (s)", "count-motion-time", 0.05f, 1.f, 0.05f, 0.22f);
     }
 
     void buildViewTab() {
@@ -2447,6 +2805,9 @@ protected:
         this->settingColor("Idle box color", "tile-color");
         this->settingColor("Pressed box color", "pressed-color");
         this->settingToggle("Press glow", "show-glow");
+        settingToggle("KPS", "show-kps");
+        settingToggle("Total presses", "show-total");
+        settingToggle("Reset on restart", "reset-on-restart");
         this->settingSlider("Position X %", "pos-x", 0.f, 100.f, 1.f);
         this->settingSlider("Position Y %", "pos-y", 0.f, 100.f, 1.f);
     }
@@ -2455,7 +2816,7 @@ protected:
         this->rowButton("Save current as new preset", ccColor3B{70, 110, 240}, [this]() {
             presetAdd(serializePreset());
             m_pendingRebuild = true;
-            this->setStatus("Saved a new preset.");
+            this->setStatus(Mod::get()->saveData().isOk() ? "Saved a new preset." : "Preset storage failed.");
         });
         int n = presetCount();
         if (n == 0) this->rowInfo("No presets yet.");
@@ -2479,11 +2840,17 @@ protected:
         this->applyScroll();
     }
 
+    void scrollInspector(float delta) {
+        float maxScroll = std::max(0.f, m_contentH - (vpY1 - vpY0));
+        m_scroll = std::clamp(m_scroll + delta, 0.f, maxScroll);
+        applyScroll();
+    }
+
     void applyScroll() {
         m_content->setPosition({inX0 + 6.f, vpY1 + m_scroll});
         float vpH = vpY1 - vpY0;
         for (auto& r : m_rows) {
-            bool vis = (r.top + m_scroll <= 0.5f) && (r.bottom + m_scroll >= -vpH - 0.5f);
+            bool vis = r.bottom + m_scroll < 0.f && r.top + m_scroll > -vpH;
             r.visible = vis;
             for (auto n : r.nodes) n->setVisible(vis);
         }
@@ -2533,7 +2900,20 @@ public:
         CCDirector::get()->getTouchDispatcher()->addTargetedDelegate(this, -2000, true);
     }
 
+    void scrollWheel(float y, float) override {
+        if (m_modal || m_dragMode || !std::isfinite(y) || y == 0.f) return;
+        float delta = std::copysign(std::clamp(std::abs(y), 24.f, 72.f), y);
+        if (m_mapMode) {
+            auto pos = m_viewer->getPosition();
+            Mod::get()->setSettingValue<double>("pos-y", std::clamp((pos.y - delta) / H * 100., 0., 100.));
+            refreshAll();
+        } else {
+            scrollInspector(delta);
+        }
+    }
+
     bool ccTouchBegan(CCTouch* touch, CCEvent*) override {
+        if (m_modal) return false;
         auto p = this->convertTouchToNodeSpace(touch);
         m_activeFixed = -1;
         m_activeScroll = -1;
@@ -2574,9 +2954,7 @@ public:
         } else if (m_scrolling) {
             float dy = p.y - m_lastY;
             m_lastY = p.y;
-            float maxS = std::max(0.f, m_contentH - (vpY1 - vpY0));
-            m_scroll = std::clamp(m_scroll + dy, 0.f, maxS);
-            this->applyScroll();
+            scrollInspector(dy);
         }
     }
 
@@ -2652,6 +3030,20 @@ class $modify(KVBaseGameLayer, GJBaseGameLayer) {
         if (!pl) return;
         auto viewer = static_cast<KVPlayLayer*>(pl)->m_fields->viewer;
         if (viewer) viewer->onButton(button, down, isPlayer1);
+    }
+};
+
+class $modify(KVKeyboard, CCKeyboardDispatcher) {
+    bool dispatchKeyboardMSG(enumKeyCodes key, bool down, bool repeat, double timestamp) {
+        auto result = CCKeyboardDispatcher::dispatchKeyboardMSG(key, down, repeat, timestamp);
+        if (down && repeat) return result;
+        auto scene = CCDirector::get()->getRunningScene();
+        auto play = PlayLayer::get();
+        if (!play || !scene) return result;
+        auto viewer = static_cast<KVPlayLayer*>(play)->m_fields->viewer;
+        if (viewer && (!down || !scene->getChildByType<PauseLayer>(0)))
+            viewer->onKeyboard(static_cast<int>(key), down);
+        return result;
     }
 };
 
