@@ -1,3 +1,10 @@
+# v1.0.3
+
+- Add a canvas zoom panel and interactive minimap.
+- Add per-key Note and Advanced settings with explicit Save and Cancel.
+- Add configurable drop shadows and raised key faces.
+- Draw a full-width note gradient and give both color stops direct opacity controls.
+
 # v1.0.2
 
 - Use the mouse wheel over number fields. Touch users can tap either half.

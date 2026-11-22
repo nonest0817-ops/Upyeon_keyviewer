@@ -257,31 +257,28 @@ static GradientStop defaultGradientTip(ccColor3B accent) {
     return {packC(lerpC(accent, {255, 255, 255}, 0.72f)), 0};
 }
 
-static CCSpriteFrame* makeGradientFrame(GradientStops const& stops) {
-    constexpr int side = 64;
-    constexpr float radius = 7.f;
-    std::array<unsigned char, side * side * 4> pixels{};
-    for (int y = 0; y < side; ++y) {
-        auto stop = gradientAt(stops, 1.f - y / float(side - 1), kNoteOpacityCurve);
-        auto color = unpackC(stop.color);
-        for (int x = 0; x < side; ++x) {
-            float dx = std::max(0.f, std::abs(x + 0.5f - side / 2.f) - (side / 2.f - radius));
-            float dy = std::max(0.f, std::abs(y + 0.5f - side / 2.f) - (side / 2.f - radius));
-            float mask = std::clamp(radius + 0.5f - std::hypot(dx, dy), 0.f, 1.f);
-            auto offset = (y * side + x) * 4;
-            pixels[offset] = color.r;
-            pixels[offset + 1] = color.g;
-            pixels[offset + 2] = color.b;
-            pixels[offset + 3] = static_cast<unsigned char>(std::lround(mask * stop.alpha));
-        }
+static float cornerInset(float localY, float h, float radius) {
+    float d = std::max(0.f, radius - std::min(localY, h - localY));
+    return radius - std::sqrt(std::max(0.f, radius * radius - d * d));
+}
+
+// Draw one continuous, full-width fill. Its geometry has no sliced texture regions.
+static void drawNoteRamp(CCDrawNode* draw, GradientStops const& colors, float x, float y,
+                         float w, float h, float rounding, float opacity, bool reverse) {
+    float radius = std::clamp(rounding, 0.f, std::min(w, h) * 0.5f);
+    int slices = std::clamp(static_cast<int>(std::ceil(h * 0.75f)), 12, 48);
+    for (int i = 0; i < slices; ++i) {
+        float t0 = static_cast<float>(i) / slices, t1 = static_cast<float>(i + 1) / slices;
+        float y0 = h * t0, y1 = h * t1;
+        float i0 = cornerInset(y0, h, radius), i1 = cornerInset(y1, h, radius);
+        float t = (t0 + t1) / 2.f;
+        auto stop = gradientAt(colors, reverse ? 1.f - t : t, kNoteOpacityCurve);
+        if (stop.alpha == 0) continue;
+        CCPoint quad[] = {{x + i0, y + y0}, {x + w - i0, y + y0},
+                         {x + w - i1, y + y1}, {x + i1, y + y1}};
+        auto color = premulC(unpackC(stop.color), opacity * stop.alpha / 255.f);
+        draw->drawPolygon(quad, 4, color, 0.f, color);
     }
-    auto texture = new CCTexture2D;
-    if (!texture->initWithData(pixels.data(), kCCTexture2DPixelFormat_RGBA8888, side, side, {side, side})) {
-        delete texture;
-        return nullptr;
-    }
-    texture->autorelease();
-    return CCSpriteFrame::createWithTexture(texture, {0.f, 0.f, side, side});
 }
 
 struct Look {
@@ -308,6 +305,19 @@ struct Look {
     float noteHeight = 90.f;
     float noteWidth = 1.0f;
     float holdLengthScale = 1.f;
+    int noteFrameLimit = 0;
+    bool reverseFlow = false;
+    float fadeStart = 0.f;
+    bool fixedShortNotes = false;
+    float shortNoteLength = 12.f;
+    float shortNoteTime = 0.050f;
+    float keyDelay = 0.f;
+    bool keyShadow = false;
+    float keyShadowDepth = 4.f;
+    float keyShadowOpacity = 0.46f;
+    int keyShadowColor = 0x000000;
+    bool keyBevel = false;
+    float keyBevelDepth = 3.f;
     float noteRimAlpha = 0.96f;
     float noteBaseGap = 5.f;
     float jumpWidth = 1.0f;
@@ -644,11 +654,24 @@ static Look lookForKey(Look const& base, KeyDef const& k) {
         if (key == "count-motion-amount") kl.countMotionAmount = static_cast<float>(std::clamp(v, 0., 100.));
         if (key == "count-motion-time") kl.countMotionTime = static_cast<float>(std::clamp(v, 0.05, 1.0));
         if (key == "note-width") kl.noteWidth = static_cast<float>(std::clamp(v, 20.0, 100.0)) / 100.f;
+        if (key == "note-fps") kl.noteFrameLimit = static_cast<int>(std::clamp(v, 0., 240.));
+        if (key == "note-reverse") kl.reverseFlow = v != 0;
+        if (key == "fade-start") kl.fadeStart = static_cast<float>(std::clamp(v, 0., 95.)) / 100.f;
+        if (key == "fixed-short-notes") kl.fixedShortNotes = v != 0;
+        if (key == "short-note-length") kl.shortNoteLength = static_cast<float>(std::clamp(v, 1., 100.));
+        if (key == "short-note-time") kl.shortNoteTime = static_cast<float>(std::clamp(v, 1., 300.)) / 1000.f;
+        if (key == "key-display-delay") kl.keyDelay = static_cast<float>(std::clamp(v, 0., 1500.)) / 1000.f;
+        if (key == "key-shadow") kl.keyShadow = v != 0;
+        if (key == "key-shadow-depth") kl.keyShadowDepth = static_cast<float>(std::clamp(v, 0., 18.));
+        if (key == "key-shadow-opacity") kl.keyShadowOpacity = static_cast<float>(std::clamp(v, 0., 100.)) / 100.f;
+        if (key == "key-shadow-color") kl.keyShadowColor = static_cast<int>(std::clamp(v, 0., 16777215.));
+        if (key == "key-bevel") kl.keyBevel = v != 0;
+        if (key == "key-bevel-depth") kl.keyBevelDepth = static_cast<float>(std::clamp(v, 0., 12.));
         if (key == "hold-length-scale") kl.holdLengthScale = static_cast<float>(std::clamp(v, 25., 200.)) / 100.f;
         if (key == "note-rim-opacity") kl.noteRimAlpha = static_cast<float>(std::clamp(v, 0., 100.)) / 100.f;
         if (key == "note-base-gap") kl.noteBaseGap = static_cast<float>(std::clamp(v, 0., 30.));
         if (key == "note-speed") kl.noteSpeed = static_cast<float>(std::clamp(v, 100.0, 600.0));
-        if (key == "note-height") kl.noteHeight = static_cast<float>(std::clamp(v, 40.0, 220.0));
+        if (key == "note-height") kl.noteHeight = static_cast<float>(std::clamp(v, 40.0, 500.0));
         if (key == "note-opacity") kl.noteOpacity = static_cast<float>(std::clamp(v, 20.0, 100.0)) / 100.f;
         if (key == "note-fade") kl.noteFade = static_cast<float>(std::clamp(v, 0.0, 3.0));
         if (key == "note-radius") kl.noteRadius = static_cast<float>(std::clamp(v, 0.0, 50.0)) / 100.f;
@@ -795,6 +818,10 @@ static void applyKeyStyle(KeyDef& current, KeyDef const& style) {
     current.borderW = style.borderW;
     current.radius = style.radius;
     auto visual = visualKeyStyle(style);
+    for (auto field : {"note-fps", "key-display-delay"}) {
+        visual.erase(field);
+        if (auto value = current.style.find(field); value != current.style.end()) visual.insert(*value);
+    }
     if (auto binding = current.style.find("key-code"); binding != current.style.end()) visual.insert(*binding);
     current.style = std::move(visual);
     saveKey(current);
@@ -964,15 +991,42 @@ static float textCenterY(Look const& look, float height) {
     return height / 2.f;
 }
 
+static void drawKeyDepth(CCDrawNode* under, CCDrawNode* rim, Look const& look,
+                         float x, float y, float w, float h, float scale, float press) {
+    if (w < 4.f || h < 4.f) return;
+    float radius = std::min(std::max(look.radius * h, 1.5f), std::min(w, h) * 0.48f);
+    if (look.keyShadow && look.keyShadowOpacity > 0.f) {
+        auto color = unpackC(look.keyShadowColor);
+        float offset = look.keyShadowDepth * scale;
+        for (int i = 3; i >= 0; --i) {
+            float spread = i * 0.7f * scale;
+            dnRound(under, x - spread, y - offset - spread, x + w + spread, y + h - offset + spread,
+                    radius + spread, color, look.keyShadowOpacity * (i == 0 ? 0.46f : 0.16f), 5);
+        }
+    }
+    if (!look.keyBevel) return;
+    float depth = look.keyBevelDepth * scale * (1.f - press * 0.30f);
+    auto face = lerpC(look.tile, look.pressed, press);
+    auto side = lerpC(face, {8, 9, 11}, 0.48f);
+    float alpha = look.tileOpacity / 255.f;
+    dnRound(under, x, y - depth, x + w, y + h - depth, radius, side, alpha, 5);
+    float inset = std::clamp(scale, 0.5f, 1.5f);
+    dnStrokeA(rim, x + inset, y + inset, x + w - inset, y + h - inset,
+              std::max(0.5f, radius - inset), lerpC(face, {255, 255, 255}, 0.45f), 0.8f * scale, 0.57f * alpha, 5);
+    if (w > 12.f && h > 8.f) {
+        float sideInset = std::min(radius + 3.f * scale, w * 0.37f);
+        dnRound(rim, x + sideInset, y + h - 2.1f * scale, x + w - sideInset, y + h - 1.2f * scale,
+                0.5f * scale, {255, 255, 255}, 0.26f * alpha, 4);
+    }
+}
+
 struct NoteSprites {
     CCScale9Sprite* glow = nullptr;
     CCScale9Sprite* base = nullptr;
-    CCScale9Sprite* gradient = nullptr;
 
     void hide() const {
         if (glow) glow->setVisible(false);
         if (base) base->setVisible(false);
-        if (gradient) gradient->setVisible(false);
     }
 };
 
@@ -980,11 +1034,9 @@ static NoteSprites createNoteSprites(CCNode* parent) {
     NoteSprites s;
     s.glow = CCScale9Sprite::create("kv_glow.png"_spr);
     s.base = CCScale9Sprite::create("kv_solid.png"_spr);
-    s.gradient = CCScale9Sprite::create("kv_solid.png"_spr);
-    if (!s.glow || !s.base || !s.gradient) return {};
+    if (!s.glow || !s.base) return {};
     parent->addChild(s.glow, 0);
     parent->addChild(s.base, 1);
-    parent->addChild(s.gradient, 1);
     s.hide();
     return s;
 }
@@ -1001,27 +1053,22 @@ static float noteSpriteScale(float radius, float width, float length) {
 static void sizeNote(NoteSprites const& s, float w, float h, float rounding, float glowScale) {
     float pad = kGlowPad * glowScale;
     fitSize(s.base, w, h, rounding);
-    fitSize(s.gradient, w, h, rounding);
     fitSize(s.glow, w + 2 * pad, h + 2 * pad, glowScale);
 }
 
-static void useGradientFrame(NoteSprites const& sprites, CCSpriteFrame* frame) {
-    if (!frame) return;
-    sprites.gradient->setSpriteFrame(frame);
-    sprites.gradient->setCapInsets({8.f, 8.f, 48.f, 48.f});
-}
-
-static void paintNote(NoteSprites const& s, CCDrawNode* border, Look const& look,
+static void paintNote(NoteSprites const& s, CCDrawNode* fill, CCDrawNode* border, Look const& look,
                       float x, float y, float w, float h, float rounding, float glowScale, float fade, bool gradient) {
     float pad = kGlowPad * glowScale;
     float opacity = std::clamp(look.noteOpacity, 0.05f, 1.f) * fade;
     auto accent = look.accentJump;
-    auto fill = gradient ? s.gradient : s.base;
     s.base->setVisible(!gradient);
-    s.gradient->setVisible(gradient);
-    placeCenter(fill, x, y, w, h);
-    fill->setColor(gradient ? ccColor3B{255, 255, 255} : accent);
-    setOp(fill, opacity);
+    if (gradient) {
+        drawNoteRamp(fill, look.noteGradient, x, y, w, h, rounding * kBaseR, opacity, look.reverseFlow);
+    } else {
+        placeCenter(s.base, x, y, w, h);
+        s.base->setColor(accent);
+        setOp(s.base, opacity);
+    }
 
     bool glow = look.noteGlow && look.glowStrength > 0.01f;
     s.glow->setVisible(glow);
@@ -1045,7 +1092,6 @@ struct Note {
     double start = 0.0;
     double end = -1.0; // 아직 누르는 중이면 -1
     NoteSprites sp;
-    unsigned gradientVersion = 0;
     float lw = -1.f, lh = -1.f, ls = -1.f, lg = -1.f; // 마지막으로 적용한 크기 (불필요한 재계산 방지)
 };
 
@@ -1076,24 +1122,12 @@ protected:
     CCLabelBMFont* m_count = nullptr;
     std::deque<Note> m_notes;
     std::vector<NoteSprites> m_pool;
-    CCSpriteFrame* m_gradientFrame = nullptr;
-    GradientStops m_gradientStops{};
-    unsigned m_gradientVersion = 0;
-
-    ~KeyLane() override {
-        if (m_gradientFrame) m_gradientFrame->release();
-    }
-
-    void refreshGradient(Look const& look) {
-        if (!look.gradNotes || (m_gradientFrame && m_gradientStops == look.noteGradient)) return;
-        auto frame = makeGradientFrame(look.noteGradient);
-        if (!frame) return;
-        frame->retain();
-        if (m_gradientFrame) m_gradientFrame->release();
-        m_gradientFrame = frame;
-        m_gradientStops = look.noteGradient;
-        ++m_gradientVersion;
-    }
+    CCDrawNode* m_noteFill = nullptr;
+    CCDrawNode* m_keyUnder = nullptr;
+    CCDrawNode* m_keyRim = nullptr;
+    double m_lastNoteFrame = -1.0;
+    struct TimedInput { int source; bool down; double time; bool notes; };
+    std::deque<TimedInput> m_pendingInput;
 
     bool init(std::string const& name) {
         if (!CCNode::init()) return false;
@@ -1106,11 +1140,17 @@ protected:
 
         m_noteLayer = CCNode::create();
         this->addChild(m_noteLayer, -1);
+        m_noteFill = CCDrawNode::create();
+        m_noteLayer->addChild(m_noteFill, 2);
         m_noteBorder = CCDrawNode::create();
         m_noteLayer->addChild(m_noteBorder, 5);
         this->addChild(m_glow, -2);
+        m_keyUnder = CCDrawNode::create();
+        this->addChild(m_keyUnder, -1);
         this->addChild(m_tile, 0);
         this->addChild(m_tileGrad, 1);
+        m_keyRim = CCDrawNode::create();
+        this->addChild(m_keyRim, 2);
 
         m_border = CCDrawNode::create();
         this->addChild(m_border, 2);
@@ -1193,6 +1233,9 @@ protected:
     // 눌림 정도에 따라 색과 투명도를 갱신 (이미지 색 입히기라 선이 생기지 않는다)
     void refreshTile() {
         float p = m_press;
+        m_keyUnder->clear();
+        m_keyRim->clear();
+        drawKeyDepth(m_keyUnder, m_keyRim, m_look, 0.f, 0.f, m_w, m_h, 1.f, p);
         float idleA = m_look.tileOpacity / 255.f;
 
         ccColor3B bottom = lerpC(m_look.tile, m_look.pressed, p);
@@ -1253,7 +1296,8 @@ public:
     }
 
     void layout(Look const& l, float w, float h) {
-        refreshGradient(l);
+        if (l.keyDelay != m_look.keyDelay) resetInput();
+        m_lastNoteFrame = -1.0;
         m_look = l;
         m_w = w;
         m_h = h;
@@ -1285,7 +1329,15 @@ public:
     }
 
     // 상태가 실제로 바뀌었을 때만 true (같은 입력이 두 번 들어와도 한 번만 센다)
-    void input(int source, bool down, double t, bool drawNotes) {
+    void input(int source, bool down, double t, bool drawNotes, bool delayAllowed = true) {
+        if (!delayAllowed || m_look.keyDelay <= 0.f || !isVisible()) {
+            renderInput(source, down, t, drawNotes);
+            return;
+        }
+        m_pendingInput.push_back({source, down, t + m_look.keyDelay, drawNotes});
+    }
+
+    void renderInput(int source, bool down, double t, bool drawNotes) {
         const unsigned bit = 1u << source;
         if (down) {
             m_held |= bit;
@@ -1312,6 +1364,7 @@ public:
     }
 
     void resetInput() {
+        m_pendingInput.clear();
         m_held = 0;
         clearNotes();
     }
@@ -1323,14 +1376,28 @@ public:
         fitCount();
     }
 
+    void suspendNotes() {
+        while (!m_pendingInput.empty()) {
+            auto event = m_pendingInput.front();
+            m_pendingInput.pop_front();
+            renderInput(event.source, event.down, nowSec(), false);
+        }
+        clearNotes();
+    }
+
     void clearNotes() {
         for (auto& n : m_notes) this->release(n.sp);
         m_notes.clear();
         m_noteBorder->clear();
+        m_noteFill->clear();
     }
 
     // 노트: 둥근 막대 + 부드러운 빛 번짐 + 선택형 테두리. 모두 이미지 한 장씩이라 선이 생기지 않는다
-    void tickNotes(double now) {
+    void tickNotes(double now, float availableBelow) {
+        if (m_look.noteFrameLimit > 0 && m_lastNoteFrame >= 0.0 &&
+            now - m_lastNoteFrame < 1.0 / m_look.noteFrameLimit) return;
+        m_lastNoteFrame = now;
+        m_noteFill->clear();
         m_noteBorder->clear();
         if (!m_look.timeline) {
             if (!m_notes.empty()) this->clearNotes();
@@ -1338,7 +1405,10 @@ public:
         }
 
         float H = m_look.noteHeight;
-        if (m_look.noteAutoY) H = std::clamp(m_noteSpace - m_noteStart, 0.f, H);
+        if (m_look.noteAutoY) {
+            float space = m_look.reverseFlow ? availableBelow - m_look.noteBaseGap : m_noteSpace - m_noteStart;
+            H = std::clamp(space, 0.f, H);
+        }
         if (H <= 0.f) {
             clearNotes();
             return;
@@ -1366,30 +1436,32 @@ public:
             double e = n.end < 0 ? now : n.end;
             float yb = static_cast<float>((now - e) * sp);
             float len = holdNoteLength(n.start, e, sp, m_look.holdLengthScale, H - yb);
+            if (m_look.fixedShortNotes && n.end >= 0 && n.end - n.start <= m_look.shortNoteTime)
+                len = std::min(H - yb, std::max(len, m_look.shortNoteLength));
             if (yb >= H || len < 0.05f) {
                 s.hide();
                 continue;
             }
-            float fade = timelineFade(yb / H, m_look.noteFade, m_look.gradNotes);
+            float fadeProgress = std::max(0.f, (yb / H - m_look.fadeStart) / (1.f - m_look.fadeStart));
+            float fade = timelineFade(fadeProgress, m_look.noteFade, m_look.gradNotes);
             float sN = noteSpriteScale(noteR, nw, len);
-            float py = baseY + yb;
-            bool applyGradient = m_look.gradNotes && m_gradientFrame;
-            if (applyGradient && n.gradientVersion != m_gradientVersion) {
-                useGradientFrame(s, m_gradientFrame);
-                n.gradientVersion = m_gradientVersion;
-                n.lw = -1.f;
-            }
+            float py = m_look.reverseFlow ? -m_look.noteBaseGap - yb - len : baseY + yb;
             if (n.lw != nw || n.lh != len || n.ls != sN || n.lg != sg) {
                 n.lw = nw; n.lh = len; n.ls = sN; n.lg = sg;
                 sizeNote(s, nw, len, sN, sg);
             }
-            paintNote(s, m_noteBorder, m_look, x0, py, nw, len, sN, sg, fade, applyGradient);
+            paintNote(s, m_noteFill, m_noteBorder, m_look, x0, py, nw, len, sN, sg, fade, m_look.gradNotes);
         }
     }
 
     int keyCode() const { return m_look.keyCode; }
 
-    void tick(double now, float dt, float noteSpace) {
+    void tick(double now, float dt, float noteSpace, float availableBelow = 0.f) {
+        while (!m_pendingInput.empty() && m_pendingInput.front().time <= now) {
+            auto event = m_pendingInput.front();
+            m_pendingInput.pop_front();
+            renderInput(event.source, event.down, event.time, event.notes);
+        }
         m_noteSpace = noteSpace;
         if (m_look.countMotion && m_countStart >= 0.0) {
             fitCount(now);
@@ -1405,7 +1477,7 @@ public:
             m_dirty = false;
             this->refreshTile();
         }
-        this->tickNotes(now);
+        this->tickNotes(now, availableBelow);
     }
 };
 
@@ -1684,7 +1756,7 @@ public:
         const bool wasVisible = m_look.viewerVisible;
         m_look = readLook();
         if (wasVisible && !m_look.viewerVisible) {
-            for (auto& r : m_lanes) r.lane->clearNotes();
+            for (auto& r : m_lanes) r.lane->suspendNotes();
         }
         this->setVisible(m_look.viewerVisible);
         this->syncLanes();
@@ -1746,7 +1818,7 @@ public:
         if (!down) {
             m_heldSources &= ~bit;
             // A key may have been remapped while this press was held.
-            for (auto& r : m_lanes) r.lane->input(source, false, t, false);
+            for (auto& r : m_lanes) r.lane->input(source, false, t, false, m_look.viewerVisible);
             return;
         }
         m_heldSources |= bit;
@@ -1754,7 +1826,7 @@ public:
         if (targets.empty()) targets = lanesForMap((source + 3) % 6);
         if (targets.empty()) return;
         for (auto lane : targets) {
-            lane->input(source, true, t, m_look.viewerVisible && lane->isVisible());
+            lane->input(source, true, t, m_look.viewerVisible && lane->isVisible(), m_look.viewerVisible);
         }
         m_hits.push_back(t);
         ++m_total;
@@ -1767,7 +1839,7 @@ public:
             bool used = false;
             for (auto& r : m_lanes) {
                 if (r.lane->keyCode() != code || !r.lane->isVisible()) continue;
-                r.lane->input(6, true, t, m_look.viewerVisible);
+                r.lane->input(6, true, t, m_look.viewerVisible, m_look.viewerVisible);
                 used = true;
             }
             if (used) {
@@ -1776,7 +1848,7 @@ public:
             }
         } else if (m_heldKeys.erase(code)) {
             for (auto& r : m_lanes)
-                if (r.lane->keyCode() == code) r.lane->input(6, false, t, false);
+                if (r.lane->keyCode() == code) r.lane->input(6, false, t, false, m_look.viewerVisible);
         }
     }
 
@@ -1828,7 +1900,7 @@ public:
         if (!m_look.viewerVisible) return;
         float top = CCDirector::get()->getWinSize().height - getPositionY();
         for (auto& r : m_lanes)
-            if (r.lane->isVisible()) r.lane->tick(now, dt, top - r.lane->getPositionY());
+            if (r.lane->isVisible()) r.lane->tick(now, dt, top - r.lane->getPositionY(), getPositionY() + r.lane->getPositionY());
 
         int values[StatCount] = {m_total, kps, m_peak};
         for (auto const& box : m_statGeo) {
@@ -2023,7 +2095,12 @@ class VisualColorPopup : public geode::Popup {
         };
         if (m_gradient) {
             drawRamp(m_paint, m_colors, 22.f, 181.f, 176.f, 12.f, kNoteOpacityCurve);
-            cursor(m_stop == 0 ? 22.f : 198.f, 187.f, 4.5f);
+            for (int i = 0; i < 2; ++i) {
+                float x = i == 0 ? 22.f : 117.f;
+                dnRound(m_paint, x, 171.f, x + 81.f, 180.f, 3.f,
+                        i == m_stop ? lerpC(field, mark, 0.18f) : field);
+                cursor(i == 0 ? 22.f : 198.f, 187.f, i == m_stop ? 4.5f : 3.f);
+            }
         } else {
             dnRound(m_paint, 22.f, 180.f, 198.f, 193.f, 3.f, unpackC(m_colors[0].color), 1.f);
         }
@@ -2044,7 +2121,7 @@ class VisualColorPopup : public geode::Popup {
             auto color = m_colors[m_stop].color;
             drawRamp(m_paint, {{{color, 0}, {color, 255}}}, 22.f, 42.f, 176.f, 9.f);
             cursor(22.f + 176.f * m_colors[m_stop].alpha / 255.f, 46.5f, 3.7f);
-            auto percent = std::to_string(std::lround(m_colors[m_stop].alpha * 100.f / 255.f)) + "%";
+            auto percent = uiText(m_stop == 0 ? "Bottom" : "Fading tip") + "  " + std::to_string(std::lround(m_colors[m_stop].alpha * 100.f / 255.f)) + "%";
             if (m_opacity) m_opacity->setString(percent.c_str());
         }
         dnRound(m_paint, 131.f, 10.f, 199.f, 32.f, 4.f, field, 1.f);
@@ -2082,6 +2159,7 @@ public:
         }
         popup->m_colors = stops;
         popup->m_gradient = gradient;
+        popup->setMouseEnabled(gradient);
         popup->m_light = light;
         popup->m_hsv = hsvFromColor(stops[0].color);
         popup->m_apply = std::move(apply);
@@ -2115,7 +2193,7 @@ public:
 
     bool ccTouchBegan(CCTouch* touch, CCEvent* event) override {
         auto p = m_mainLayer->convertTouchToNodeSpace(touch);
-        if (m_gradient && CCRect(16.f, 177.f, 188.f, 21.f).containsPoint(p)) {
+        if (m_gradient && CCRect(16.f, 171.f, 188.f, 27.f).containsPoint(p)) {
             m_stop = p.x < 110.f ? 0 : 1;
             m_hsv = hsvFromColor(m_colors[m_stop].color);
             refresh();
@@ -2133,6 +2211,14 @@ public:
         return true;
     }
 
+    void scrollWheel(float delta, float) override {
+        if (!m_gradient || delta == 0.f || !std::isfinite(delta)) return;
+        auto cursor = m_mainLayer->convertToNodeSpace(geode::cocos::getMousePos());
+        if (!CCRect(16.f, 38.f, 188.f, 17.f).containsPoint(cursor)) return;
+        m_colors[m_stop].alpha = std::clamp(m_colors[m_stop].alpha + (delta < 0.f ? 5 : -5), 0, 255);
+        refresh();
+    }
+
     void ccTouchMoved(CCTouch* touch, CCEvent*) override {
         if (m_drag > 0 && m_drag < 4) updateColor(m_mainLayer->convertTouchToNodeSpace(touch));
     }
@@ -2146,6 +2232,185 @@ public:
         }
     }
     void ccTouchCancelled(CCTouch*, CCEvent*) override { m_drag = 0; }
+};
+
+struct TimelineField {
+    const char* key;
+    const char* label;
+    float min;
+    float max;
+    float step;
+};
+
+static constexpr std::array<TimelineField, 10> kTimelineFields = {{
+    {"note-fps", "Note frame limit", 0, 240, 5},
+    {"note-speed", "Speed", 100, 600, 5},
+    {"note-height", "Timeline length", 40, 500, 5},
+    {"note-reverse", "Reverse flow", 0, 1, 1},
+    {"fade-start", "Fade begins %", 0, 95, 5},
+    {"note-fade", "Fade amount", 0, 3, 0.1f},
+    {"fixed-short-notes", "Standardize short notes", 0, 1, 1},
+    {"short-note-length", "Short note length", 1, 100, 1},
+    {"short-note-time", "Short input threshold ms", 1, 300, 5},
+    {"key-display-delay", "Key display delay ms", 0, 1500, 5},
+}};
+
+class TimelineSettingsPopup : public geode::Popup {
+    std::array<float, 10> m_values{};
+    std::array<CCLabelBMFont*, 6> m_labels{}, m_numbers{};
+    std::array<CCLabelBMFont*, 2> m_tabs{};
+    CCLabelBMFont* m_autoDelay = nullptr;
+    CCDrawNode* m_surface = nullptr;
+    int m_tab = 0;
+    int m_action = 0;
+    bool m_light = true;
+    std::function<void(std::array<float, 10> const&)> m_save;
+    std::function<void()> m_dismiss;
+
+    ccColor3B ink() const { return m_light ? ccColor3B{42, 48, 63} : ccColor3B{233, 237, 245}; }
+    ccColor3B panel() const { return m_light ? ccColor3B{243, 246, 251} : ccColor3B{35, 42, 54}; }
+    ccColor3B field() const { return m_light ? ccColor3B{225, 232, 241} : ccColor3B{57, 65, 80}; }
+    ccColor3B accent() const { return m_light ? ccColor3B{70, 91, 178} : ccColor3B{109, 128, 211}; }
+
+    int rows() const { return m_tab == 0 ? 6 : 4; }
+    int index(int row) const { return m_tab == 0 ? row : row + 6; }
+    int recommendation() const { return std::clamp(static_cast<int>(std::lround(m_values[2] * 1000.f / m_values[1])), 0, 1500); }
+
+    int rowAt(CCPoint p) const {
+        for (int i = 0; i < rows(); ++i) {
+            float y = 163.f - i * 21.f;
+            if (CCRect(166.f, y - 8.5f, 59.f, 17.f).containsPoint(p)) return i;
+        }
+        return -1;
+    }
+
+    void redraw() {
+        m_surface->clear();
+        dnRound(m_surface, 8.f, 5.f, 232.f, 229.f, 9.f, panel());
+        for (int i = 0; i < 2; ++i) {
+            float x = 18.f + i * 102.f;
+            dnRound(m_surface, x, 179.f, x + 101.f, 199.f, 5.f, i == m_tab ? accent() : field());
+            if (m_tabs[i]) m_tabs[i]->setColor(i == m_tab ? kWhite : ink());
+        }
+        for (int i = 0; i < 6; ++i) {
+            bool visible = i < rows();
+            if (!m_labels[i] || !m_numbers[i]) continue;
+            m_labels[i]->setVisible(visible);
+            m_numbers[i]->setVisible(visible);
+            if (!visible) continue;
+            auto j = index(i);
+            auto def = kTimelineFields[j];
+            float y = 163.f - i * 21.f;
+            dnRound(m_surface, 15.f, y - 9.5f, 225.f, y + 9.5f, 3.f, field(), 0.48f);
+            dnRound(m_surface, 166.f, y - 8.5f, 225.f, y + 8.5f, 4.f, field());
+            m_labels[i]->setString(uiText(def.label).c_str());
+            m_labels[i]->setScale(std::min(0.28f, 145.f / std::max(1.f, m_labels[i]->getContentSize().width)));
+            auto value = j == 3 || j == 6 ? uiText(m_values[j] ? "On" : "Off") : fmtNum(m_values[j]);
+            m_numbers[i]->setString(value.c_str());
+        }
+        if (m_autoDelay) m_autoDelay->setVisible(m_tab == 1);
+        if (m_tab == 1) {
+            dnRound(m_surface, 112.f, 63.f, 225.f, 83.f, 4.f, field());
+            if (m_autoDelay) m_autoDelay->setString((uiText("Auto delay") + " " + std::to_string(recommendation()) + "ms").c_str());
+        }
+        dnRound(m_surface, 17.f, 13.f, 134.f, 34.f, 5.f, accent());
+        dnRound(m_surface, 140.f, 13.f, 223.f, 34.f, 5.f, field());
+    }
+
+    void adjust(int row, int direction) {
+        int j = index(row);
+        auto const& def = kTimelineFields[j];
+        if (j == 3 || j == 6) m_values[j] = m_values[j] == 0.f ? 1.f : 0.f;
+        else m_values[j] = std::clamp(std::round((m_values[j] + direction * def.step) * 1000.f) / 1000.f, def.min, def.max);
+        redraw();
+    }
+
+    void onClose(CCObject* sender) override {
+        if (m_dismiss) {
+            auto dismiss = std::move(m_dismiss);
+            dismiss();
+        }
+        Popup::onClose(sender);
+    }
+
+public:
+    static TimelineSettingsPopup* create(std::array<float, 10> values, bool light,
+            std::function<void(std::array<float, 10> const&)> save, std::function<void()> dismiss) {
+        auto popup = new TimelineSettingsPopup;
+        float viewport = CCDirector::get()->getWinSize().height;
+        if (!popup->Popup::init(240.f, 236.f)) {
+            delete popup;
+            return nullptr;
+        }
+        popup->m_values = values;
+        popup->m_light = light;
+        popup->m_save = std::move(save);
+        popup->m_dismiss = std::move(dismiss);
+        popup->setMouseEnabled(true);
+        popup->m_surface = CCDrawNode::create();
+        popup->m_mainLayer->addChild(popup->m_surface, 1);
+        auto make = [&](std::string text, float scale, float x, float y, float anchor, ccColor3B color) {
+            auto label = mkLabel(popup->m_mainLayer, text, scale, color, {x, y}, anchor);
+            if (label) label->setZOrder(2);
+            return label;
+        };
+        make("Timeline settings", 0.42f, 120.f, 213.f, 0.5f, popup->ink());
+        popup->m_tabs[0] = make("NOTE", 0.30f, 69.f, 189.f, 0.5f, popup->ink());
+        popup->m_tabs[1] = make("Advanced", 0.30f, 171.f, 189.f, 0.5f, popup->ink());
+        for (int i = 0; i < 6; ++i) {
+            float y = 163.f - i * 21.f;
+            popup->m_labels[i] = make("", 0.28f, 20.f, y, 0.f, popup->ink());
+            popup->m_numbers[i] = make("", 0.28f, 195.f, y, 0.5f, popup->ink());
+        }
+        popup->m_autoDelay = make("", 0.26f, 168.f, 73.f, 0.5f, popup->ink());
+        make("SAVE", 0.31f, 76.f, 23.5f, 0.5f, kWhite);
+        make("Cancel", 0.30f, 182.f, 23.5f, 0.5f, popup->ink());
+        if (popup->m_buttonMenu) popup->m_buttonMenu->setZOrder(3);
+        if (viewport > 0.f && viewport < 256.f) popup->m_mainLayer->setScale(viewport / 256.f);
+        popup->redraw();
+        popup->autorelease();
+        return popup;
+    }
+
+    void scrollWheel(float delta, float) override {
+        if (!std::isfinite(delta) || delta == 0.f) return;
+        int row = rowAt(m_mainLayer->convertToNodeSpace(geode::cocos::getMousePos()));
+        if (row >= 0) adjust(row, delta < 0.f ? 1 : -1);
+    }
+
+    bool ccTouchBegan(CCTouch* touch, CCEvent* event) override {
+        auto p = m_mainLayer->convertTouchToNodeSpace(touch);
+        if (CCRect(18.f, 179.f, 203.f, 20.f).containsPoint(p)) {
+            m_tab = p.x < 120.f ? 0 : 1;
+            redraw();
+            return true;
+        }
+        if (auto row = rowAt(p); row >= 0) {
+            adjust(row, p.x < 195.5f ? -1 : 1);
+            return true;
+        }
+        if (m_tab == 1 && CCRect(112.f, 63.f, 113.f, 20.f).containsPoint(p)) {
+            m_values[9] = recommendation();
+            redraw();
+            return true;
+        }
+        if (CCRect(17.f, 13.f, 117.f, 21.f).containsPoint(p)) m_action = 1;
+        else if (CCRect(140.f, 13.f, 83.f, 21.f).containsPoint(p)) m_action = 2;
+        else return Popup::ccTouchBegan(touch, event);
+        return true;
+    }
+    void ccTouchEnded(CCTouch* touch, CCEvent*) override {
+        int action = m_action;
+        m_action = 0;
+        auto p = m_mainLayer->convertTouchToNodeSpace(touch);
+        if (action == 1 && CCRect(17.f, 13.f, 117.f, 21.f).containsPoint(p)) {
+            m_save(m_values);
+            onClose(nullptr);
+        } else if (action == 2 && CCRect(140.f, 13.f, 83.f, 21.f).containsPoint(p)) {
+            onClose(nullptr);
+        }
+    }
+    void ccTouchCancelled(CCTouch*, CCEvent*) override { m_action = 0; }
 };
 
 class KVEditor : public CCLayer {
@@ -2186,6 +2451,7 @@ protected:
     std::vector<CCLabelBMFont*> m_tileLabels;
     CCNode* m_counterPreview = nullptr;
     CCNode* m_notePreview = nullptr;
+    CCNode* m_depthPreview = nullptr;
     std::vector<Btn> m_btns, m_mapBtns;
 
     std::vector<Ctl> m_fixed, m_scrollCtls;
@@ -2202,6 +2468,14 @@ protected:
 
     static constexpr float kSc = 1.4f;
     View m_fit;
+    View m_minimapProjection;
+    CCRect m_zoomPanel{0, 0, 0, 0};
+    CCRect m_minimap{0, 0, 0, 0};
+    float m_zoom = 1.f;
+    CCPoint m_pan{0.f, 0.f};
+    CCDrawNode* m_canvasStencil = nullptr;
+    CCDrawNode* m_zoomDraw = nullptr;
+    CCLabelBMFont* m_zoomLabel = nullptr;
 
     ccColor3B uiInk() const { return m_light ? ccColor3B{40, 48, 56} : ccColor3B{234, 237, 240}; }
     ccColor3B uiMuted() const { return m_light ? ccColor3B{88, 97, 108} : ccColor3B{171, 179, 188}; }
@@ -2237,10 +2511,16 @@ protected:
         this->addChild(m_back, 0);
         m_chrome = CCDrawNode::create();
         this->addChild(m_chrome, 1);
+        auto canvasClip = CCClippingNode::create();
+        m_canvasStencil = CCDrawNode::create();
+        canvasClip->setStencil(m_canvasStencil);
+        this->addChild(canvasClip, 2);
         m_canvas = CCDrawNode::create();
-        this->addChild(m_canvas, 2);
+        canvasClip->addChild(m_canvas, 0);
         m_canvasLabels = CCNode::create();
-        this->addChild(m_canvasLabels, 3);
+        canvasClip->addChild(m_canvasLabels, 1);
+        m_depthPreview = CCNode::create();
+        m_canvasLabels->addChild(m_depthPreview);
         m_notePreview = CCNode::create();
         m_canvasLabels->addChild(m_notePreview);
         m_counterPreview = CCNode::create();
@@ -2257,6 +2537,15 @@ protected:
         this->addChild(m_bar, 5);
         m_winLabels = CCNode::create();
         this->addChild(m_winLabels, 6);
+        m_zoomDraw = CCDrawNode::create();
+        m_winLabels->addChild(m_zoomDraw);
+        float left = cvX0 + 7.f, top = cvY1 - 7.f;
+        m_zoomPanel = CCRect(left, top - 54.f, 104.f, 54.f);
+        m_minimap = CCRect(left + 6.f, top - 48.f, 92.f, 28.f);
+        m_zoomLabel = mkLabel(m_winLabels, "", 0.23f, uiInk(), {left + 87.f, top - 9.f}, 0.5f);
+        mkLabel(m_winLabels, "Fit", 0.22f, uiInk(), {left + 16.f, top - 9.f}, 0.5f);
+        mkLabel(m_winLabels, "-", 0.31f, uiInk(), {left + 43.f, top - 9.f}, 0.5f);
+        mkLabel(m_winLabels, "+", 0.31f, uiInk(), {left + 64.f, top - 9.f}, 0.5f);
         m_mapChrome = CCDrawNode::create();
         this->addChild(m_mapChrome, 7);
         m_mapLabels = CCNode::create();
@@ -2310,12 +2599,12 @@ protected:
         // 아래 도구 막대
         {
             struct Def { char const* label; int id; };
-            Def defs[6] = {
-                {"Add Key", 20}, {"Del Key", 21}, {"Map", 22}, {"Press", 12}, {"Reset", 13}, {"Show", 11}
+            Def defs[7] = {
+                {"Add Key", 20}, {"Del Key", 21}, {"Map", 22}, {"Press", 12}, {"Reset", 13}, {"Show", 11}, {"Tools", 31}
             };
             float total = winX1 - winX0 - 16.f;
-            float bw = (total - 5.f * 4.f) / 6.f;
-            for (int i = 0; i < 6; i++) {
+            float bw = (total - 6.f * 4.f) / 7.f;
+            for (int i = 0; i < 7; i++) {
                 Btn b;
                 b.label = defs[i].label;
                 b.id = defs[i].id;
@@ -2325,8 +2614,9 @@ protected:
                 b.y1 = tbY1;
                 m_btns.push_back(b);
 
+                float titleX = (b.x0 + b.x1) / 2.f + (b.id == 31 && bw > 32.f ? 6.f : 0.f);
                 auto lab = mkLabel(m_winLabels, b.label, 0.30f, uiInk(),
-                                   CCPoint((b.x0 + b.x1) / 2.f, (b.y0 + b.y1) / 2.f), 0.5f);
+                                   CCPoint(titleX, (b.y0 + b.y1) / 2.f), 0.5f);
                 if (lab) {
                     float lw = lab->getContentSize().width * 0.30f;
                     if (lw > bw - 6.f && lw > 0.f) lab->setScale(0.30f * (bw - 6.f) / lw);
@@ -2388,6 +2678,7 @@ protected:
                     ccColor3B{210, 210, 225}, CCPoint(14.f, H - 46.f), 0.f);
         }
 
+        addZoomControls();
         this->loadAndSelect();
         this->setMapMode(false);
         this->scheduleUpdate();
@@ -2416,7 +2707,9 @@ protected:
             v.oy = p.y;
             v.sc = 1.f;
         } else {
-            v = m_fit;
+            float cx = (cvX0 + cvX1) / 2.f, cy = (cvY0 + cvY1) / 2.f;
+            v = {cx + (m_fit.ox - cx) * m_zoom + m_pan.x,
+                 cy + (m_fit.oy - cy) * m_zoom + m_pan.y, m_fit.sc * m_zoom};
         }
         return v;
     }
@@ -2507,6 +2800,9 @@ protected:
 
     void setMapMode(bool on) {
         m_mapMode = on;
+        m_canvasStencil->clear();
+        if (on) dnRect(m_canvasStencil, 0.f, 0.f, W, H, kWhite, 1.f);
+        else dnRect(m_canvasStencil, cvX0, cvY0 + 14.f, cvX1, cvY1, kWhite, 1.f);
         m_chrome->setVisible(!on);
         m_content->setVisible(!on);
         m_bar->setVisible(!on);
@@ -2623,6 +2919,9 @@ protected:
         } else if (id == 22) {
             this->setMapMode(true);
             return;
+        } else if (id == 31) {
+            openTimelineSettings();
+            return;
         } else if (id == 30) {
             this->setMapMode(false);
             return;
@@ -2653,6 +2952,105 @@ protected:
             bool on = this->btnActive(b);
             dnRound(m_mapChrome, b.x0, b.y0, b.x1, b.y1, 6.f,
                     on ? ccColor3B{70, 110, 240} : ccColor3B{40, 40, 52}, 0.92f, 4);
+        }
+    }
+
+    void openTimelineSettings() {
+        int id = m_sel;
+        auto key = keyById(id);
+        if (!key) return;
+        auto look = lookForKey(readLook(), *key);
+        std::array<float, 10> values = {float(look.noteFrameLimit), look.noteSpeed, look.noteHeight,
+            look.reverseFlow ? 1.f : 0.f, look.fadeStart * 100.f, look.noteFade, look.fixedShortNotes ? 1.f : 0.f,
+            look.shortNoteLength, look.shortNoteTime * 1000.f, look.keyDelay * 1000.f};
+        auto popup = TimelineSettingsPopup::create(values, m_light, [this, id](auto const& updated) {
+            auto key = keyById(id);
+            if (!key) return;
+            for (size_t i = 0; i < kTimelineFields.size(); ++i) key->style[kTimelineFields[i].key] = updated[i];
+            commitKey(id);
+            (void)Mod::get()->saveData();
+        }, [this] {
+            m_modal = false;
+            m_pendingRebuild = true;
+        });
+        if (!popup) return;
+        m_modal = true;
+        popup->show();
+    }
+
+    void changeZoom(float factor, bool reset = false) {
+        m_zoom = reset ? 1.f : std::clamp(m_zoom * factor, 0.35f, 4.f);
+        if (reset) m_pan = {0.f, 0.f};
+        redrawCanvas();
+    }
+
+    void centerFromMinimap(CCPoint point) {
+        if (m_minimapProjection.sc <= 0.f) return;
+        auto display = view();
+        CCPoint center{(cvX0 + cvX1) / 2.f, (cvY0 + cvY1) / 2.f};
+        float x = (point.x - m_minimapProjection.ox) / m_minimapProjection.sc;
+        float y = (point.y - m_minimapProjection.oy) / m_minimapProjection.sc;
+        m_pan.x += center.x - (display.ox + x * display.sc);
+        m_pan.y += center.y - (display.oy + y * display.sc);
+        redrawCanvas();
+    }
+
+    void addZoomControls() {
+        float left = m_zoomPanel.origin.x, top = m_zoomPanel.origin.y + m_zoomPanel.size.height;
+        Ctl area;
+        area.r = m_zoomPanel;
+        m_fixed.push_back(area);
+        for (int i = 0; i < 3; ++i) {
+            Ctl button;
+            button.r = CCRect(left + 4.f + i * 22.f, top - 18.f, 22.f, 16.f);
+            button.down = [this, i](CCPoint) { changeZoom(i == 1 ? 0.8f : 1.25f, i == 0); };
+            m_fixed.push_back(button);
+        }
+        Ctl pan;
+        pan.r = m_minimap;
+        pan.down = [this](CCPoint p) { centerFromMinimap(p); };
+        pan.move = [this](CCPoint p) {
+            p.x = std::clamp(p.x, m_minimap.origin.x, m_minimap.origin.x + m_minimap.size.width);
+            p.y = std::clamp(p.y, m_minimap.origin.y, m_minimap.origin.y + m_minimap.size.height);
+            centerFromMinimap(p);
+        };
+        m_fixed.push_back(pan);
+    }
+
+    void redrawMinimap() {
+        if (!m_zoomDraw || m_mapMode) return;
+        m_zoomDraw->clear();
+        float x = m_zoomPanel.origin.x, y = m_zoomPanel.origin.y;
+        dnRound(m_zoomDraw, x, y, x + m_zoomPanel.size.width, y + m_zoomPanel.size.height, 6.f, uiPanel(), 0.96f);
+        dnStrokeA(m_zoomDraw, x + 0.6f, y + 0.6f, x + m_zoomPanel.size.width - 0.6f, y + m_zoomPanel.size.height - 0.6f,
+                  5.f, uiLine(), 0.65f, 1.f);
+        if (m_zoomLabel) m_zoomLabel->setString((std::to_string(std::lround(m_zoom * 100.f)) + "%").c_str());
+        float x0 = m_minimap.origin.x, y0 = m_minimap.origin.y;
+        float x1 = x0 + m_minimap.size.width, y1 = y0 + m_minimap.size.height;
+        dnRound(m_zoomDraw, x0, y0, x1, y1, 3.f, uiField(), 1.f);
+        float worldW = (cvX1 - cvX0) / m_fit.sc, worldH = (cvY1 - cvY0) / m_fit.sc;
+        float scale = std::min((x1 - x0) / worldW, (y1 - y0) / worldH);
+        if (scale <= 0.f) return;
+        float fitX = ((cvX0 + cvX1) / 2.f - m_fit.ox) / m_fit.sc;
+        float fitY = ((cvY0 + cvY1) / 2.f - m_fit.oy) / m_fit.sc;
+        m_minimapProjection = {(x0 + x1) / 2.f - fitX * scale, (y0 + y1) / 2.f - fitY * scale, scale};
+        auto tile = [&](float x, float y, float w, float h) {
+            float l = std::max(x0, m_minimapProjection.ox + x * scale);
+            float b = std::max(y0, m_minimapProjection.oy + y * scale);
+            float r = std::min(x1, m_minimapProjection.ox + (x + w) * scale);
+            float t = std::min(y1, m_minimapProjection.oy + (y + h) * scale);
+            if (r > l && t > b) dnRect(m_zoomDraw, l, b, r, t, uiMuted(), 0.85f);
+        };
+        for (auto const& g : m_viewer->geo()) tile(g.x, g.y, g.w, g.h);
+        for (auto const& g : m_viewer->statGeo()) tile(g.position.x, g.position.y, g.width, g.height);
+        auto v = view();
+        float l = std::max(x0, m_minimapProjection.ox + (cvX0 - v.ox) * scale / v.sc);
+        float b = std::max(y0, m_minimapProjection.oy + (cvY0 - v.oy) * scale / v.sc);
+        float r = std::min(x1, m_minimapProjection.ox + (cvX1 - v.ox) * scale / v.sc);
+        float t = std::min(y1, m_minimapProjection.oy + (cvY1 - v.oy) * scale / v.sc);
+        if (r - l > 1.f && t - b > 1.f) {
+            dnRect(m_zoomDraw, l, b, r, t, uiAccent(), 0.15f);
+            dnStrokeA(m_zoomDraw, l, b, r, t, 1.4f, uiAccent(), 0.65f, 0.90f);
         }
     }
 
@@ -2693,6 +3091,15 @@ protected:
             dnRound(m_chrome, b.x0, b.y0, b.x1, b.y1, 6.f, on ? active : uiField(), 1.f, 4);
             if (on) dnStrokeA(m_chrome, b.x0 + 0.5f, b.y0 + 0.5f, b.x1 - 0.5f, b.y1 - 0.5f,
                               5.5f, uiAccent(), 0.8f, 0.63f, 4);
+            if (b.id == 31 && b.x1 - b.x0 > 32.f) {
+                float middle = (b.y0 + b.y1) / 2.f;
+                for (int i = 0; i < 3; ++i) {
+                    float x = b.x0 + 7.f + 3.f * i;
+                    dnRect(m_chrome, x, middle - 4.f, x + 0.75f, middle + 4.f, uiInk(), 0.82f);
+                    float knob = middle + (i == 1 ? 1.1f : -1.3f);
+                    dnRect(m_chrome, x - 0.7f, knob - 1.f, x + 1.5f, knob + 1.f, uiInk(), 1.f);
+                }
+            }
         }
     }
 
@@ -2729,12 +3136,13 @@ protected:
         float radius = std::clamp(look.noteRadius * w, 1.5f, 16.f);
         float glow = std::clamp(look.glowSize, 0.3f, 3.f);
         auto sample = CCNode::create();
+        auto fill = CCDrawNode::create();
         auto border = CCDrawNode::create();
+        sample->addChild(fill, 2);
         sample->addChild(border, 5);
         sample->setScale(zoom);
         sample->setPosition({x, y});
         m_notePreview->addChild(sample);
-        auto frame = look.gradNotes ? makeGradientFrame(look.noteGradient) : nullptr;
         float bottom = 0.f;
         for (double hold : {0.075, 0.032, 0.017}) {
             float h = holdNoteLength(0.0, hold, look.noteSpeed, look.holdLengthScale, look.noteHeight - bottom);
@@ -2742,10 +3150,10 @@ protected:
             float rounding = noteSpriteScale(radius, w, h);
             auto sprites = createNoteSprites(sample);
             if (!sprites.base) break;
-            useGradientFrame(sprites, frame);
             sizeNote(sprites, w, h, rounding, glow);
             float fade = timelineFade(bottom / look.noteHeight, look.noteFade, look.gradNotes);
-            paintNote(sprites, border, look, (width - w) / 2.f, look.noteBaseGap + bottom, w, h, rounding, glow, fade, frame != nullptr);
+            float y = look.reverseFlow ? -look.noteBaseGap - bottom - h : look.noteBaseGap + bottom;
+            paintNote(sprites, fill, border, look, (width - w) / 2.f, y, w, h, rounding, glow, fade, look.gradNotes);
             bottom += h + 7.f;
         }
     }
@@ -2754,7 +3162,9 @@ protected:
         m_canvas->clear();
         m_counterPreview->removeAllChildrenWithCleanup(true);
         m_notePreview->removeAllChildrenWithCleanup(true);
+        m_depthPreview->removeAllChildrenWithCleanup(true);
         if (!m_mapMode && m_dragMode == 0) updateFit();
+        redrawMinimap();
         if (!m_mapMode || !m_viewer->isVisible()) {
             auto v = this->view();
             auto base = readLook();
@@ -2800,11 +3210,14 @@ protected:
             float x1 = x0 + w, y1 = y0 + h;
             float r = std::min(std::max(kl.radius * h, 2.f), std::min(w, h) / 2.f);
 
-            if (!m_mapMode && kl.timeline && g.id == m_sel) drawNotePreview(kl, x0, y1, g.w, v.sc);
+            if (!m_mapMode && kl.timeline && g.id == m_sel) drawNotePreview(kl, x0, kl.reverseFlow ? y0 : y1, g.w, v.sc);
 
             bool pressed = m_previewPressed;
             ccColor3B fill = pressed ? kl.pressed : kl.tile;
             float a = pressed ? 1.f : std::max(0.55f, kl.tileOpacity / 255.f);
+            auto previewDepth = CCDrawNode::create();
+            m_depthPreview->addChild(previewDepth, 2);
+            drawKeyDepth(m_canvas, previewDepth, kl, x0, y0, w, h, v.sc, pressed ? 1.f : 0.f);
             dnRound(m_canvas, x0, y0, x1, y1, r, fill, a, 5);
             if (kl.borderW > 0.f) dnStroke(m_canvas, x0, y0, x1, y1, r, kl.border, kl.borderW * v.sc, 5);
 
@@ -3514,6 +3927,12 @@ protected:
         settingToggle("Key counters", "show-counter");
         localToggle("Box gradient", "tile-idle-gradient", false);
         settingColor("Gradient end color", "gradient-color");
+        localToggle("Key shadow", "key-shadow", false);
+        localSlider("Shadow distance", "key-shadow-depth", 0.f, 18.f, 1.f, 4.f);
+        localSlider("Shadow opacity %", "key-shadow-opacity", 0.f, 100.f, 5.f, 46.f);
+        localColor("Shadow color", "key-shadow-color", 0, false);
+        localToggle("Raised key", "key-bevel", false);
+        localSlider("Raised depth", "key-bevel-depth", 0.f, 12.f, 1.f, 3.f);
         rowColor("Background color",
             [id]() { auto k = keyById(id); return k ? k->bg : -1; },
             [this, id](int v) { if (auto k = keyById(id)) k->bg = v; this->commitKey(id); }, true);
@@ -3541,7 +3960,7 @@ protected:
         localSlider("Hold length scale %", "hold-length-scale", 25.f, 200.f, 5.f, 100.f);
         localSlider("Gap above key", "note-base-gap", 0.f, 30.f, 1.f, 5.f);
         this->settingSlider("Speed", "note-speed", 100.f, 600.f, 5.f);
-        this->settingSlider("Timeline length", "note-height", 40.f, 220.f, 5.f);
+        this->settingSlider("Timeline length", "note-height", 40.f, 500.f, 5.f);
         rowToggle("Note gradient",
             [id] { auto key = keyById(id); return key && lookForKey(readLook(), *key).gradNotes; },
             [this, id](bool enabled) { writeStyle(id, "note-gradient-enabled", enabled); });
@@ -3852,8 +4271,10 @@ public:
             auto pos = m_viewer->getPosition();
             Mod::get()->setSettingValue<double>("pos-y", std::clamp((pos.y - delta) / H * 100., 0., 100.));
             refreshAll();
-        } else if (!adjustWheelAt(convertToNodeSpace(geode::cocos::getMousePos()), y)) {
-            scrollInspector(delta);
+        } else {
+            auto cursor = convertToNodeSpace(geode::cocos::getMousePos());
+            if (m_zoomPanel.containsPoint(cursor)) changeZoom(y < 0.f ? 1.12f : 1.f / 1.12f);
+            else if (!adjustWheelAt(cursor, y)) scrollInspector(delta);
         }
     }
 
@@ -3929,6 +4350,8 @@ public:
                 next->m_statTab = m_statTab;
                 next->m_undoPreset = m_undoPreset;
                 next->m_scroll = m_scroll;
+                next->m_zoom = m_zoom;
+                next->m_pan = m_pan;
                 next->setMapMode(false);
                 getParent()->addChild(next, 100000);
                 removeFromParentAndCleanup(true);
