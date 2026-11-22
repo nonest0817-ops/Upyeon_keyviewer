@@ -8,7 +8,7 @@
   },
   "id": "nonest.keyviewer",
   "name": "Key Viewer",
-  "version": "v0.7.0",
+  "version": "v0.8.0",
   "developer": "nonest",
   "description": "Dark, glowing key viewer with rising notes, gradient colors, add-able keys, user presets and an in-game editor opened from the pause menu.",
   "settings": {
@@ -237,6 +237,93 @@
         "slider": true
       },
       "name": "Timeline Length"
+    },
+    "note-opacity": {
+      "type": "float",
+      "default": 92.0,
+      "min": 20.0,
+      "max": 100.0,
+      "control": {
+        "slider": true
+      },
+      "name": "Note Opacity (%)"
+    },
+    "note-fade": {
+      "type": "float",
+      "default": 1.3,
+      "min": 0.0,
+      "max": 3.0,
+      "control": {
+        "slider": true
+      },
+      "name": "Note Fade",
+      "description": "How fast notes fade as they rise. 0 means no fade."
+    },
+    "note-radius": {
+      "type": "float",
+      "default": 14.0,
+      "min": 0.0,
+      "max": 50.0,
+      "control": {
+        "slider": true
+      },
+      "name": "Note Roundness (%)",
+      "description": "Corner roundness relative to the note width."
+    },
+    "note-border": {
+      "type": "float",
+      "default": 0.0,
+      "min": 0.0,
+      "max": 4.0,
+      "control": {
+        "slider": true
+      },
+      "name": "Note Border",
+      "description": "Outline thickness around notes. 0 hides it."
+    },
+    "note-border-color": {
+      "type": "rgb",
+      "default": [
+        255,
+        255,
+        255
+      ],
+      "name": "Note Border Color"
+    },
+    "note-glow-strength": {
+      "type": "float",
+      "default": 100.0,
+      "min": 0.0,
+      "max": 200.0,
+      "control": {
+        "slider": true
+      },
+      "name": "Glow Strength (%)"
+    },
+    "note-glow-size": {
+      "type": "float",
+      "default": 100.0,
+      "min": 50.0,
+      "max": 250.0,
+      "control": {
+        "slider": true
+      },
+      "name": "Glow Size (%)"
+    },
+    "note-glow-custom": {
+      "type": "bool",
+      "default": false,
+      "name": "Custom Glow Color",
+      "description": "Use the glow color below instead of the note color."
+    },
+    "note-glow-color": {
+      "type": "rgb",
+      "default": [
+        255,
+        60,
+        70
+      ],
+      "name": "Glow Color"
     },
     "pos-x": {
       "type": "float",
