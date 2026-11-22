@@ -8,24 +8,10 @@
   },
   "id": "nonest.keyviewer",
   "name": "Key Viewer",
-  "version": "v0.6.0",
+  "version": "v0.7.0",
   "developer": "nonest",
-  "description": "Dark, glowing key viewer with rising notes, gradient colors, per-key styling and an in-game editor opened from the pause menu.",
+  "description": "Dark, glowing key viewer with rising notes, gradient colors, add-able keys, user presets and an in-game editor opened from the pause menu.",
   "settings": {
-    "preset": {
-      "type": "string",
-      "default": "Custom",
-      "one-of": [
-        "Custom",
-        "Dark",
-        "Neon",
-        "Rhythm",
-        "Light",
-        "Minimal"
-      ],
-      "name": "Preset",
-      "description": "Custom uses the settings below. Other presets override colors and effects. Position and size are kept."
-    },
     "show-viewer": {
       "type": "bool",
       "default": true,
@@ -67,12 +53,6 @@
       "default": true,
       "name": "Note Glow",
       "description": "Soft glow around the rising note bars."
-    },
-    "show-p2": {
-      "type": "bool",
-      "default": false,
-      "name": "Separate P2 Row",
-      "description": "Show P1 and P2 inputs separately in 2-player or dual levels. Experimental."
     },
     "reset-on-restart": {
       "type": "bool",
