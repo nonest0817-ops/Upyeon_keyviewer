@@ -742,6 +742,9 @@ static std::string serializePreset(int target) {
     auto key = keyById(target);
     if (!key) return {};
     KeyDef snapshot = *key;
+    auto inherited = readLook();
+    snapshot.style.try_emplace("surface", inherited.surface);
+    snapshot.style.try_emplace("impact", inherited.impact);
     includeInheritedStyle(snapshot, readPresetDefaults());
     return keyStyleRecord(snapshot, 'A');
 }
@@ -1239,7 +1242,7 @@ protected:
             float alpha = m_look.surface == 2 ? 0.39f : 0.25f;
             auto edge = lerpC(color, {255, 255, 255}, 0.35f);
             dnStrokeA(m_surfaceDetail, 1.1f, 1.1f, m_w - 1.1f, m_h - 1.1f,
-                      radius, 0.62f, edge, opacity * (alpha + 0.28f * p), 5);
+                      radius, edge, 0.62f, opacity * (alpha + 0.28f * p), 5);
             if (m_look.surface != 3) {
                 float inset = std::clamp(radius + 3.f, 3.5f, m_w * 0.4f);
                 dnRound(m_surfaceDetail, inset, m_h - 3.4f, m_w - inset, m_h - 2.4f,
@@ -1273,7 +1276,7 @@ protected:
         if (m_w < 10.f || m_h < 10.f) return;
 
         auto color = accent();
-        if (meter > 0.005f) {
+        if ((m_w - 6.f) * meter > 1.f) {
             float right = 3.f + (m_w - 6.f) * meter;
             dnRound(m_response, 3.f, 1.9f, right, 3.35f, 0.7f, color, 0.80f, 3);
         }
@@ -1284,7 +1287,7 @@ protected:
         const float radius = std::min(m_w, m_h) * m_look.radius;
         if (m_look.impact == 2) {
             dnStrokeA(m_response, -expansion, -expansion, m_w + expansion, m_h + expansion,
-                      radius + expansion * 0.5f, 0.85f, color, attenuation * 0.65f, 5);
+                      radius + expansion * 0.5f, color, 0.85f, attenuation * 0.65f, 5);
         } else if (m_look.impact == 3) {
             for (int i = 0; i < 6; ++i) {
                 float angle = kPi * (0.25f + i / 3.f);
@@ -1297,6 +1300,7 @@ protected:
         } else {
             float start = 2.f + (m_w - 4.f) * t;
             float finish = std::min(m_w - 2.f, start + m_w * 0.43f);
+            if (finish - start < 1.f) return;
             dnRound(m_response, start, m_h - 3.2f, finish, m_h - 1.4f, 0.9f,
                       lerpC(color, {255, 255, 255}, 0.6f), attenuation, 3);
         }
@@ -2555,8 +2559,8 @@ protected:
     void drawChromeButton(CCDrawNode* node, Btn const& b) {
         bool active = btnActive(b);
         dnRound(node, b.x0, b.y0, b.x1, b.y1, 6.f, active ? kActiveTile : kPanelRaised, 0.98f, 4);
-        dnStrokeA(node, b.x0 + 0.5f, b.y0 + 0.5f, b.x1 - 0.5f, b.y1 - 0.5f, 5.f, 0.65f,
-                  active ? kBlue : kPanelLine, active ? 0.87f : 0.68f, 4);
+        dnStrokeA(node, b.x0 + 0.5f, b.y0 + 0.5f, b.x1 - 0.5f, b.y1 - 0.5f, 5.f, active ? kBlue : kPanelLine,
+                  0.65f, active ? 0.87f : 0.68f, 4);
     }
 
     void redrawMapBar() {
@@ -2569,7 +2573,7 @@ protected:
         dnRound(m_chrome, winX0 + 2.f, winY0 - 2.f, winX1 + 2.f, winY1 - 2.f, 13.f, {0, 0, 0}, 0.52f, 5);
         dnRound(m_chrome, winX0, winY0, winX1, winY1, 12.f, {10, 16, 29}, 1.f, 5);
         dnStrokeA(m_chrome, winX0 + 1.f, winY0 + 1.f, winX1 - 1.f, winY1 - 1.f, 12.f,
-                  0.8f, kPanelLine, 0.88f, 5);
+                  kPanelLine, 0.8f, 0.88f, 5);
 
         float cy = winY1 - 15.5f;
         float cx = winX0 + 20.f;
@@ -2581,7 +2585,7 @@ protected:
 
         dnRound(m_chrome, cvX0, cvY0, cvX1, cvY1, 8.f, {7, 13, 24}, 1.f, 5);
         dnStrokeA(m_chrome, cvX0 + 0.5f, cvY0 + 0.5f, cvX1 - 0.5f, cvY1 - 0.5f,
-                  7.f, 0.65f, kPanelLine, 0.78f, 4);
+                  7.f, kPanelLine, 0.65f, 0.78f, 4);
         for (float x = cvX0 + 12.f; x < cvX1 - 8.f; x += 16.f) {
             for (float y = cvY0 + 19.f; y < cvY1 - 8.f; y += 16.f)
                 dnRect(m_chrome, x, y, x + 0.75f, y + 0.75f, kBlue, 0.22f);
@@ -2590,7 +2594,7 @@ protected:
 
         dnRound(m_chrome, inX0, inY0, inX1, inY1, 8.f, kPanel, 1.f, 5);
         dnStrokeA(m_chrome, inX0 + 0.5f, inY0 + 0.5f, inX1 - 0.5f, inY1 - 0.5f,
-                  7.f, 0.65f, kPanelLine, 0.77f, 4);
+                  7.f, kPanelLine, 0.65f, 0.77f, 4);
         float tw = (inX1 - inX0 - 12.f) / 5.f;
         for (int i = 0; i < 5; ++i) {
             float x = inX0 + 6.f + i * tw;
@@ -3607,7 +3611,7 @@ protected:
         auto draw = rowDraw(row);
         auto accent = unpackC(style.accent);
         dnRound(draw, 0.f, top - 29.f, m_inW, top - 3.f, 6.f, unpackC(style.face), 1.f, 4);
-        dnStrokeA(draw, 0.5f, top - 28.5f, m_inW - 0.5f, top - 3.5f, 5.f, 0.7f, accent, 0.55f, 4);
+        dnStrokeA(draw, 0.5f, top - 28.5f, m_inW - 0.5f, top - 3.5f, 5.f, accent, 0.7f, 0.55f, 4);
         dnRound(draw, 6.f, top - 23.f, 18.f, top - 9.f, 3.4f, accent, 0.91f, 4);
         auto title = rowLabel(row, style.title, 25.f, top - 16.f, 0.30f, kWhite, 0.f);
         if (title) title->setScale(std::min(0.30f, (m_inW - 48.f) / std::max(1.f, title->getContentSize().width)));
