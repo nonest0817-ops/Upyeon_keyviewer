@@ -1,3 +1,10 @@
+# v0.9.3
+
+- Scale note length to input hold duration.
+- Configure independent Total, KPS and Peak KPS tiles.
+- Save named, style-only presets and undo the last application.
+- Include three photo-inspired presets with gradient profiles and adjustable rims.
+
 # v0.9.2
 
 - Type individual key names, including Hangul.

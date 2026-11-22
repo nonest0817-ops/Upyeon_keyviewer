@@ -98,28 +98,6 @@ static std::string cleanStr(std::string s) {
     return s;
 }
 
-// Preserve commas and semicolons in user names in the legacy preset container.
-static std::string encodeName(std::string const& name) {
-    std::string result;
-    for (unsigned char byte : name) {
-        result += "0123456789ABCDEF"[byte >> 4];
-        result += "0123456789ABCDEF"[byte & 15];
-    }
-    return result;
-}
-
-static std::string decodeName(std::string const& encoded) {
-    constexpr std::string_view digits = "0123456789ABCDEF";
-    if (encoded.size() > 144 || encoded.size() % 2) return {};
-    std::string name;
-    for (size_t i = 0; i < encoded.size(); i += 2) {
-        auto high = digits.find(encoded[i]), low = digits.find(encoded[i + 1]);
-        if (high == digits.npos || low == digits.npos || (high == 0 && low == 0)) return {};
-        name += static_cast<char>(high * 16 + low);
-    }
-    return name;
-}
-
 static bool hasHangul(std::string_view text) {
     return std::any_of(text.begin(), text.end(), [](unsigned char byte) { return byte >= 0x80; });
 }
@@ -260,6 +238,7 @@ struct Look {
     ccColor3B gradEnd = {255, 140, 230};
     bool gradNotes = false;
     bool gradTile = false;
+    bool idleGradient = false;
     bool neonGradient = true;
     ccColor3B noteGradTop = {255, 255, 255};
     std::string labelJump = "JUMP";
@@ -268,7 +247,11 @@ struct Look {
     float noteSpeed = 260.f;
     float noteHeight = 90.f;
     float noteWidth = 1.0f;
-    float noteMin = 18.f;
+    float holdLengthScale = 1.f;
+    bool reverseNoteGradient = false;
+    float noteRimAlpha = 0.96f;
+    int highlightProfile = 0;
+    float noteBaseGap = 5.f;
     float jumpWidth = 1.0f;
     float noteOpacity = 0.92f;
     float noteFade = 1.3f;
@@ -343,7 +326,6 @@ static Look readLook() {
     l.noteSpeed = static_cast<float>(m->getSettingValue<double>("note-speed"));
     l.noteHeight = static_cast<float>(m->getSettingValue<double>("note-height"));
     l.noteWidth = static_cast<float>(m->getSettingValue<double>("note-width")) / 100.f;
-    l.noteMin = static_cast<float>(m->getSettingValue<double>("note-min-length"));
     l.jumpWidth = static_cast<float>(m->getSettingValue<double>("jump-width"));
     l.noteOpacity = static_cast<float>(m->getSettingValue<double>("note-opacity")) / 100.f;
     l.noteFade = static_cast<float>(m->getSettingValue<double>("note-fade"));
@@ -519,6 +501,49 @@ static void loadKeys() {
     if (g_keys.empty()) createDefaultKeys();
 }
 
+enum StatMetric { TotalMetric, KpsMetric, PeakMetric, StatCount };
+
+static const std::array<char const*, StatCount> kStatNames = {"Total", "KPS", "Peak KPS"};
+static std::array<StyleValues, StatCount> g_statSettings;
+static std::array<std::string, StatCount> g_statNames;
+
+static std::string statKey(int index, char const* suffix) {
+    return "stat_" + std::to_string(index) + "_" + suffix;
+}
+
+static void loadStats() {
+    static bool loaded = false;
+    if (loaded) return;
+    loaded = true;
+    auto mod = Mod::get();
+    for (int i = 0; i < StatCount; ++i) {
+        g_statSettings[i] = decodeStyle(mod->getSavedValue<std::string>(statKey(i, "style"), ""));
+        g_statNames[i] = mod->getSavedValue<std::string>(statKey(i, "name"), "");
+    }
+}
+
+static double statValue(int index, std::string const& key, double fallback) {
+    auto const& settings = g_statSettings[index];
+    if (auto it = settings.find(key); it != settings.end()) return it->second;
+    return fallback;
+}
+
+static void saveStat(int index) {
+    auto mod = Mod::get();
+    mod->setSavedValue<std::string>(statKey(index, "style"), encodeStyle(g_statSettings[index]));
+    mod->setSavedValue<std::string>(statKey(index, "name"), g_statNames[index]);
+}
+
+static std::string statName(int index) {
+    if (!g_statNames[index].empty()) return g_statNames[index];
+    int language = static_cast<int>(std::clamp(statValue(index, "language", 0), 0., 2.));
+    if (language == 0 ? koreanUI() : language == 1) {
+        static const std::array<char const*, StatCount> korean = {"합계", "초당 입력", "최고 KPS"};
+        return korean[index];
+    }
+    return kStatNames[index];
+}
+
 // 전체 설정에 키별 설정을 덮어씌운다
 static Look lookForKey(Look const& base, KeyDef const& k) {
     Look kl = base;
@@ -539,6 +564,7 @@ static Look lookForKey(Look const& base, KeyDef const& k) {
         if (key == "label-color") kl.labelColor = static_cast<int>(std::clamp(v, 0., 16777215.));
         if (key == "neon-gradient") kl.neonGradient = v != 0;
         if (key == "note-gradient-top") kl.noteGradTop = unpackC(static_cast<int>(std::clamp(v, 0., 16777215.)));
+        if (key == "tile-idle-gradient") kl.idleGradient = v != 0;
         if (key == "note-auto-y") kl.noteAutoY = v != 0;
         if (key == "count-area") kl.countArea = static_cast<int>(std::clamp(v, 0., 1.));
         if (key == "count-direction") kl.countDirection = static_cast<int>(std::clamp(v, 0., 3.));
@@ -555,7 +581,11 @@ static Look lookForKey(Look const& base, KeyDef const& k) {
         if (key == "count-motion-amount") kl.countMotionAmount = static_cast<float>(std::clamp(v, 0., 100.));
         if (key == "count-motion-time") kl.countMotionTime = static_cast<float>(std::clamp(v, 0.05, 1.0));
         if (key == "note-width") kl.noteWidth = static_cast<float>(std::clamp(v, 20.0, 100.0)) / 100.f;
-        if (key == "note-min-length") kl.noteMin = static_cast<float>(std::clamp(v, 2.0, 60.0));
+        if (key == "hold-length-scale") kl.holdLengthScale = static_cast<float>(std::clamp(v, 25., 200.)) / 100.f;
+        if (key == "gradient-reverse") kl.reverseNoteGradient = v != 0;
+        if (key == "note-rim-opacity") kl.noteRimAlpha = static_cast<float>(std::clamp(v, 0., 100.)) / 100.f;
+        if (key == "note-highlight-profile") kl.highlightProfile = static_cast<int>(std::clamp(v, 0., 2.));
+        if (key == "note-base-gap") kl.noteBaseGap = static_cast<float>(std::clamp(v, 0., 30.));
         if (key == "note-speed") kl.noteSpeed = static_cast<float>(std::clamp(v, 100.0, 600.0));
         if (key == "note-height") kl.noteHeight = static_cast<float>(std::clamp(v, 40.0, 220.0));
         if (key == "note-opacity") kl.noteOpacity = static_cast<float>(std::clamp(v, 20.0, 100.0)) / 100.f;
@@ -578,6 +608,7 @@ static Look lookForKey(Look const& base, KeyDef const& k) {
             kl.gradTile = v == 2 || v == 3;
         }
     }
+    kl.gradTile = kl.gradTile || kl.idleGradient;
     return kl;
 }
 
@@ -615,102 +646,194 @@ struct SetDef {
 };
 
 static SetDef const kSetDefs[] = {
-    {"show-viewer", SetType::Bool}, {"show-timeline", SetType::Bool}, {"show-counter", SetType::Bool}, {"show-kps", SetType::Bool},
-    {"show-total", SetType::Bool}, {"show-glow", SetType::Bool}, {"note-glow", SetType::Bool},
-    {"reset-on-restart", SetType::Bool},
-    {"box-size", SetType::Num}, {"jump-width", SetType::Num}, {"corner-radius", SetType::Num},
-    {"box-gap", SetType::Num}, {"note-width", SetType::Num}, {"note-min-length", SetType::Num},
-    {"note-speed", SetType::Num}, {"note-height", SetType::Num}, {"pos-x", SetType::Num},
-    {"pos-y", SetType::Num},
-    {"tile-opacity", SetType::Int},
-    {"note-opacity", SetType::Num}, {"note-fade", SetType::Num}, {"note-radius", SetType::Num},
+    {"show-timeline", SetType::Bool}, {"show-counter", SetType::Bool},
+    {"show-glow", SetType::Bool}, {"note-glow", SetType::Bool},
+    {"corner-radius", SetType::Num}, {"note-width", SetType::Num},
+    {"note-speed", SetType::Num}, {"note-height", SetType::Num},
+    {"tile-opacity", SetType::Int}, {"note-opacity", SetType::Num},
+    {"note-fade", SetType::Num}, {"note-radius", SetType::Num},
     {"note-border", SetType::Num}, {"note-glow-strength", SetType::Num}, {"note-glow-size", SetType::Num},
     {"note-glow-custom", SetType::Bool}, {"note-border-color", SetType::Color}, {"note-glow-color", SetType::Color},
     {"tile-color", SetType::Color}, {"pressed-color", SetType::Color}, {"accent-jump", SetType::Color},
     {"accent-left", SetType::Color}, {"accent-right", SetType::Color}, {"gradient-color", SetType::Color},
-    {"gradient-mode", SetType::Str}, {"label-jump", SetType::Str}, {"label-left", SetType::Str},
-    {"label-right", SetType::Str}
+    {"gradient-mode", SetType::Str}
 };
 
+static StyleValues visualKeyStyle(KeyDef const& key) {
+    auto style = key.style;
+    style.erase("key-code");
+    style.erase("note-min-length");
+    return style;
+}
+
+static StyleValues visualStatStyle(StyleValues style) {
+    for (auto field : {"language", "visible", "anchor", "x", "y", "width", "height"}) style.erase(field);
+    return style;
+}
+
+static std::string keyStyleRecord(KeyDef const& key, char type) {
+    std::string out(1, type);
+    return out + "," + std::to_string(key.id) + "," + std::to_string(key.bg) + "," +
+        std::to_string(key.pressed) + "," + std::to_string(key.border) + "," +
+        std::to_string(key.accent) + "," + numStr(key.borderW) + "," + numStr(key.radius) + "," +
+        encodeStyle(visualKeyStyle(key)) + ";";
+}
+
 static std::string serializePreset() {
-    auto m = Mod::get();
+    auto mod = Mod::get();
     std::string out;
     for (auto const& d : kSetDefs) {
-        std::string k = d.key;
-        std::string v;
+        std::string key = d.key;
+        std::string value;
         switch (d.type) {
-            case SetType::Bool: v = m->getSettingValue<bool>(k) ? "1" : "0"; break;
-            case SetType::Num: v = numStr(m->getSettingValue<double>(k)); break;
-            case SetType::Int: v = std::to_string(m->getSettingValue<int64_t>(k)); break;
-            case SetType::Color: v = std::to_string(packC(m->getSettingValue<ccColor3B>(k))); break;
-            case SetType::Str: v = cleanStr(m->getSettingValue<std::string>(k)); break;
+            case SetType::Bool: value = mod->getSettingValue<bool>(key) ? "1" : "0"; break;
+            case SetType::Num: value = numStr(mod->getSettingValue<double>(key)); break;
+            case SetType::Int: value = std::to_string(mod->getSettingValue<int64_t>(key)); break;
+            case SetType::Color: value = std::to_string(packC(mod->getSettingValue<ccColor3B>(key))); break;
+            case SetType::Str: value = cleanStr(mod->getSettingValue<std::string>(key)); break;
         }
-        out += "S," + k + "," + v + ";";
+        out += "S," + key + "," + value + ";";
     }
-    for (auto const& k : g_keys) {
-        out += "K," + std::to_string(k.id) + "," + std::to_string(k.map) + "," + numStr(k.x) + "," +
-               numStr(k.y) + "," + numStr(k.w) + "," + numStr(k.h) + "," + std::to_string(k.bg) + "," +
-               std::to_string(k.pressed) + "," + std::to_string(k.border) + "," + std::to_string(k.accent) + "," +
-               numStr(k.borderW) + "," + numStr(k.radius) + "," + std::to_string(k.label) + "," + encodeStyle(k.style) + ",," + encodeName(k.text) + ";";
-    }
+    for (auto const& key : g_keys) out += keyStyleRecord(key, 'Y');
+    for (int i = 0; i < StatCount; ++i)
+        out += "T," + std::to_string(i) + "," + encodeStyle(visualStatStyle(g_statSettings[i])) + ";";
     return out;
 }
 
+static void applyKeyStyle(KeyDef& current, KeyDef const& style) {
+    current.bg = style.bg;
+    current.pressed = style.pressed;
+    current.border = style.border;
+    current.accent = style.accent;
+    current.borderW = style.borderW;
+    current.radius = style.radius;
+    auto visual = visualKeyStyle(style);
+    if (auto binding = current.style.find("key-code"); binding != current.style.end()) visual.insert(*binding);
+    current.style = std::move(visual);
+    saveKey(current);
+}
+
 static bool applyPresetData(std::string const& data) {
-    auto m = Mod::get();
-    std::vector<KeyDef> keys;
-    for (auto const& rec : splitStr(data, ';')) {
-        if (rec.empty()) continue;
-        auto f = splitStr(rec, ',');
-        if (f[0] == "K" && f.size() >= 14) {
-            KeyDef k;
-            k.id = std::atoi(f[1].c_str());
-            k.map = std::clamp(std::atoi(f[2].c_str()), 0, 5);
-            k.x = static_cast<float>(std::atof(f[3].c_str()));
-            k.y = static_cast<float>(std::atof(f[4].c_str()));
-            k.w = static_cast<float>(std::atof(f[5].c_str()));
-            k.h = static_cast<float>(std::atof(f[6].c_str()));
-            k.bg = std::atoi(f[7].c_str());
-            k.pressed = std::atoi(f[8].c_str());
-            k.border = std::atoi(f[9].c_str());
-            k.accent = std::atoi(f[10].c_str());
-            k.borderW = static_cast<float>(std::atof(f[11].c_str()));
-            k.radius = static_cast<float>(std::atof(f[12].c_str()));
-            k.label = std::clamp(std::atoi(f[13].c_str()), 0, kLabelCount - 1);
-            if (f.size() >= 15) k.style = decodeStyle(f[14]);
-            if (f.size() >= 17) k.text = decodeName(f[16]);
-            else if (f.size() >= 16) k.text = f[15].substr(0, 24);
-            if (!validName(k.text)) return false;
-            if (k.id < 0 || k.id == INT32_MAX || !std::isfinite(k.x) || !std::isfinite(k.y) ||
-                !std::isfinite(k.w) || !std::isfinite(k.h) ||
-                std::any_of(keys.begin(), keys.end(), [&](KeyDef const& prior) { return prior.id == k.id; }))
-                return false;
-            keys.push_back(k);
-        }
-    }
-    if (keys.empty()) return false;
+    auto mod = Mod::get();
+    std::vector<KeyDef> keyStyles;
+    std::array<StyleValues, StatCount> stats{};
+    std::array<bool, StatCount> hasStats{};
+    std::vector<std::pair<SetDef, std::string>> settings;
+    bool forAll = false;
     for (auto const& record : splitStr(data, ';')) {
         auto f = splitStr(record, ',');
-        if (f[0] == "S" && f.size() >= 3) {
+        if (f[0] == "S" && f.size() == 3) {
             for (auto const& d : kSetDefs) {
-                if (f[1] != d.key) continue;
-                std::string k = d.key;
-                switch (d.type) {
-                    case SetType::Bool: m->setSettingValue<bool>(k, f[2] == "1"); break;
-                    case SetType::Num: m->setSettingValue<double>(k, std::atof(f[2].c_str())); break;
-                    case SetType::Int: m->setSettingValue<int64_t>(k, std::atoll(f[2].c_str())); break;
-                    case SetType::Color: m->setSettingValue<ccColor3B>(k, unpackC(std::atoi(f[2].c_str()))); break;
-                    case SetType::Str: m->setSettingValue<std::string>(k, f[2]); break;
-                }
+                if (f[1] == d.key) settings.emplace_back(d, f[2]);
+            }
+        } else if (f[0] == "T" && f.size() == 3) {
+            if (f[1] != "0" && f[1] != "1" && f[1] != "2") continue;
+            int index = f[1][0] - '0';
+            stats[index] = visualStatStyle(decodeStyle(f[2]));
+            hasStats[index] = true;
+        } else if (f[0] == "K" || f[0] == "Y" || f[0] == "A") {
+            bool legacy = f[0] == "K";
+            if (f.size() < (legacy ? 14u : 9u)) return false;
+            KeyDef key;
+            key.id = std::atoi(f[1].c_str());
+            size_t first = legacy ? 7 : 2;
+            key.bg = std::atoi(f[first].c_str());
+            key.pressed = std::atoi(f[first + 1].c_str());
+            key.border = std::atoi(f[first + 2].c_str());
+            key.accent = std::atoi(f[first + 3].c_str());
+            key.borderW = static_cast<float>(std::atof(f[first + 4].c_str()));
+            key.radius = static_cast<float>(std::atof(f[first + 5].c_str()));
+            size_t styleIndex = legacy ? 14 : 8;
+            if (f.size() > styleIndex) key.style = decodeStyle(f[styleIndex]);
+            if (!std::isfinite(key.borderW) || !std::isfinite(key.radius)) return false;
+            key.borderW = std::clamp(key.borderW, 0.f, 6.f);
+            key.radius = std::clamp(key.radius, -1.f, 50.f);
+            keyStyles.push_back(std::move(key));
+            forAll = forAll || f[0] == "A";
+        }
+    }
+    if (keyStyles.empty()) return false;
+    for (auto const& [d, value] : settings) {
+        std::string key = d.key;
+        switch (d.type) {
+            case SetType::Bool: mod->setSettingValue<bool>(key, value == "1"); break;
+            case SetType::Num: {
+                double number = std::atof(value.c_str());
+                if (std::isfinite(number)) mod->setSettingValue<double>(key, number);
                 break;
+            }
+            case SetType::Int: mod->setSettingValue<int64_t>(key, std::atoll(value.c_str())); break;
+            case SetType::Color: mod->setSettingValue<ccColor3B>(key, unpackC(std::atoi(value.c_str()))); break;
+            case SetType::Str: mod->setSettingValue<std::string>(key, value); break;
+        }
+    }
+    for (size_t i = 0; i < g_keys.size(); ++i) {
+        auto& current = g_keys[i];
+        if (forAll) {
+            applyKeyStyle(current, keyStyles.front());
+        } else {
+            auto match = std::find_if(keyStyles.begin(), keyStyles.end(),
+                [&](KeyDef const& style) { return style.id == current.id; });
+            if (match != keyStyles.end()) applyKeyStyle(current, *match);
+            else if (i < keyStyles.size()) {
+                bool slotAlreadyMatched = keyById(keyStyles[i].id) != nullptr;
+                if (!slotAlreadyMatched) applyKeyStyle(current, keyStyles[i]);
             }
         }
     }
-    g_keys = std::move(keys);
-    for (auto const& k : g_keys) g_nextId = std::max(g_nextId, k.id + 1);
-    saveKeyList();
-    for (auto const& k : g_keys) saveKey(k);
+    for (int i = 0; i < StatCount; ++i) {
+        if (!hasStats[i]) continue;
+        auto existing = g_statSettings[i];
+        for (auto const& [key, value] : visualStatStyle(existing)) g_statSettings[i].erase(key);
+        g_statSettings[i].insert(stats[i].begin(), stats[i].end());
+        saveStat(i);
+    }
     return true;
+}
+
+static const std::array<char const*, 3> kPhotoPresets = {"Red neon", "Cyan glass", "Red-white tip"};
+
+static std::string photoPreset(int index) {
+    auto i = std::clamp(index, 0, 2);
+    constexpr std::array<int, 3> bottom = {0xff1627, 0x00dce9, 0xf60019};
+    constexpr std::array<int, 3> top = {0xffe3e9, 0xbafcff, 0xfffbfb};
+    constexpr std::array<int, 3> edge = {0xffb0b9, 0xd5fbff, 0xffc4ca};
+    KeyDef key;
+    key.bg = i == 1 ? 0x182c37 : 0x0a0d13;
+    key.pressed = i == 1 ? 0xb0fbff : 0xffffff;
+    key.border = i == 1 ? 0x557287 : 0x526477;
+    key.borderW = i == 2 ? 0.4f : 0.7f;
+    key.accent = bottom[i];
+    key.radius = i == 1 ? 8.f : 5.f;
+    key.style = {
+        {"show-timeline", 1}, {"note-glow", 1}, {"show-glow", 1}, {"gradient-mode", 3},
+        {"neon-gradient", 1}, {"note-gradient-top", double(top[i])},
+        {"gradient-color", double(i == 1 ? 0x344957 : 0x435164)},
+        {"tile-idle-gradient", i == 2 ? 0. : 1.}, {"tile-opacity", 230},
+        {"note-highlight-profile", i == 2 ? 2. : i == 1 ? 1. : 0.},
+        {"note-glow-custom", 1}, {"note-glow-color", double(bottom[i])},
+        {"note-glow-strength", i == 0 ? 155. : i == 1 ? 110. : 65.},
+        {"note-glow-size", i == 0 ? 106. : i == 1 ? 82. : 64.},
+        {"note-border", i == 2 ? 0.85 : 1.35}, {"note-border-color", double(edge[i])},
+        {"note-rim-opacity", 99}, {"note-width", i == 0 ? 91. : 94.},
+        {"note-radius", i == 1 ? 9. : 5.}, {"note-opacity", i == 1 ? 82. : 97.},
+        {"note-fade", i == 2 ? 0.55 : 0.80}, {"note-speed", i == 2 ? 340. : 275.},
+        {"note-height", i == 2 ? 180. : 127.}, {"note-base-gap", i == 2 ? 1. : 5.},
+        {"hold-length-scale", i == 2 ? 128. : 100.},
+        {"label-color", double(i == 2 ? 0xe6e8ed : 0xfafaff)}, {"label-size", i == 2 ? 8. : 7.},
+        {"count-color", double(0xfafaff)}, {"count-size", 7.}
+    };
+    std::string data = keyStyleRecord(key, 'A');
+    for (int j = 0; j < StatCount; ++j) {
+        StyleValues stats = {
+            {"background", double(key.bg)}, {"rim", double(key.border)}, {"rim-width", 0.75},
+            {"idle-gradient", 1}, {"gradient-color", double(i == 1 ? 0x385a69 : 0x434d5a)},
+            {"label-color", double(0xfafaff)}, {"count-color", double(0xffffff)},
+            {"label-size", 8.}, {"count-size", 8.}, {"tile-opacity", 228.}, {"roundness", 6.}
+        };
+        data += "T," + std::to_string(j) + "," + encodeStyle(stats) + ";";
+    }
+    return data;
 }
 
 static int presetCount() {
@@ -729,11 +852,11 @@ static void presetSetData(int i, std::string const& data) {
     Mod::get()->setSavedValue<std::string>("pr_" + std::to_string(i) + "_data", data);
 }
 
-static void presetAdd(std::string const& data) {
+static void presetAdd(std::string const& data, std::string const& name = {}) {
     auto m = Mod::get();
     int n = presetCount();
     int next = static_cast<int>(m->getSavedValue<int64_t>("pr_next", 1));
-    m->setSavedValue<std::string>("pr_" + std::to_string(n) + "_name", "Preset " + std::to_string(next));
+    m->setSavedValue<std::string>("pr_" + std::to_string(n) + "_name", name.empty() ? "Preset " + std::to_string(next) : name);
     m->setSavedValue<std::string>("pr_" + std::to_string(n) + "_data", data);
     m->setSavedValue<int64_t>("pr_next", next + 1);
     m->setSavedValue<int64_t>("pr_count", n + 1);
@@ -798,6 +921,8 @@ struct NoteSprites {
     CCScale9Sprite* base = nullptr;
     CCScale9Sprite* grad = nullptr;
     CCScale9Sprite* solid = nullptr;
+    CCScale9Sprite* linear = nullptr;
+    CCScale9Sprite* head = nullptr;
 };
 
 static NoteSprites createNoteSprites(CCNode* parent) {
@@ -806,12 +931,25 @@ static NoteSprites createNoteSprites(CCNode* parent) {
     s.base = CCScale9Sprite::create("kv_fade2.png"_spr);
     s.grad = CCScale9Sprite::create("kv_grad2.png"_spr);
     s.solid = CCScale9Sprite::create("kv_solid.png"_spr);
-    if (!s.glow || !s.base || !s.grad || !s.solid) return {};
+    s.linear = CCScale9Sprite::create("kv_linear.png"_spr);
+    s.head = CCScale9Sprite::create("kv_head.png"_spr);
+    if (!s.glow || !s.base || !s.grad || !s.solid || !s.linear || !s.head) return {};
     parent->addChild(s.glow, 0);
     parent->addChild(s.base, 1);
     parent->addChild(s.solid, 1);
     parent->addChild(s.grad, 2);
+    parent->addChild(s.linear, 2);
+    parent->addChild(s.head, 2);
     return s;
+}
+
+static float holdNoteLength(double start, double end, float speed, float scale, float available) {
+    return std::clamp(static_cast<float>(std::max(0.0, end - start) * speed * scale),
+                      0.f, std::max(0.f, available));
+}
+
+static float noteSpriteScale(float radius, float width, float length) {
+    return std::min({std::max(0.04f, radius / kBaseR), width / kCap, length / kCap});
 }
 
 static bool neonNote(Look const& look) {
@@ -823,6 +961,8 @@ static void sizeNote(NoteSprites const& s, float w, float h, float rounding, flo
     fitSize(s.base, w, h, rounding);
     fitSize(s.solid, w, h, rounding);
     fitSize(s.grad, w, h, rounding);
+    fitSize(s.linear, w, h, rounding);
+    fitSize(s.head, w, h, rounding);
     fitSize(s.glow, w + 2 * pad, h + 2 * pad, glowScale);
 }
 
@@ -839,11 +979,13 @@ static void paintNote(NoteSprites const& s, CCDrawNode* border, Look const& look
     placeCenter(fill, x, y, w, h);
     fill->setColor(accent);
     setOp(fill, opacity);
-    s.grad->setVisible(look.gradNotes);
+    auto gradient = look.highlightProfile == 1 ? s.linear : look.highlightProfile == 2 ? s.head : s.grad;
+    for (auto layer : {s.grad, s.linear, s.head}) layer->setVisible(look.gradNotes && layer == gradient);
     if (look.gradNotes) {
-        placeCenter(s.grad, x, y, w, h);
-        s.grad->setColor(top);
-        setOp(s.grad, opacity);
+        placeCenter(gradient, x, y, w, h);
+        gradient->setScaleY(look.reverseNoteGradient ? -rounding : rounding);
+        gradient->setColor(top);
+        setOp(gradient, opacity);
     }
 
     bool glow = look.noteGlow && look.glowStrength > 0.01f;
@@ -858,8 +1000,9 @@ static void paintNote(NoteSprites const& s, CCDrawNode* border, Look const& look
 
     if (look.noteBorder > 0.f || neon) {
         float thickness = look.noteBorder > 0.f ? look.noteBorder : std::clamp(w * 0.035f, 0.55f, 1.4f);
+        thickness = std::min(thickness, h * 0.28f);
         auto edge = look.noteBorder > 0.f ? look.noteBorderColor : lerpC(accent, {255, 255, 255}, 0.80f);
-        float edgeOpacity = neon ? fade * 0.96f : std::min(1.f, opacity + 0.15f);
+        float edgeOpacity = (neon ? fade : std::min(1.f, opacity + 0.15f)) * look.noteRimAlpha;
         dnStrokeA(border, x, y, x + w, y + h, rounding * kBaseR, edge, thickness, edgeOpacity, 4);
     }
 }
@@ -950,6 +1093,8 @@ protected:
         s.glow->setVisible(false);
         s.base->setVisible(false);
         s.solid->setVisible(false);
+        s.linear->setVisible(false);
+        s.head->setVisible(false);
         s.grad->setVisible(false);
         m_pool.push_back(s);
     }
@@ -977,10 +1122,10 @@ protected:
             border->setScale(scale);
             border->setVisible(m_look.counter && offset > 0.f);
         }
-        m_noteStart = m_h + 5.f;
+        m_noteStart = m_h + m_look.noteBaseGap;
         if (m_look.noteAutoY && m_look.counter && outside && m_look.countDirection == 1 &&
             (m_look.countFill || m_look.countOutline > 0))
-            m_noteStart = std::max(m_noteStart, y + height / 2 + m_look.countOutline + 5.f);
+            m_noteStart = std::max(m_noteStart, y + height / 2 + m_look.countOutline + m_look.noteBaseGap);
     }
 
     void setCountText() {
@@ -1005,10 +1150,10 @@ protected:
         m_tile->setColor(bottom);
         setOp(m_tile, idleA + (1.f - idleA) * p);
 
-        if (m_look.gradTile && p > 0.01f) {
+        if (m_look.gradTile && (m_look.idleGradient || p > 0.01f)) {
             m_tileGrad->setVisible(true);
             m_tileGrad->setColor(m_look.gradEnd);
-            setOp(m_tileGrad, p);
+            setOp(m_tileGrad, m_look.idleGradient ? idleA : p);
         } else {
             m_tileGrad->setVisible(false);
         }
@@ -1022,7 +1167,8 @@ protected:
 
         // 글자 색: 배경 밝기에 맞춰 자동 대비
         ccColor3B pressBg = m_look.gradTile ? lerpC(m_look.pressed, m_look.gradEnd, 0.5f) : m_look.pressed;
-        ccColor3B idleText = m_look.tileOpacity < 128 ? ccColor3B{255, 255, 255} : textFor(m_look.tile);
+        auto idleBackground = m_look.idleGradient ? lerpC(m_look.tile, m_look.gradEnd, 0.5f) : m_look.tile;
+        ccColor3B idleText = m_look.tileOpacity < 128 ? ccColor3B{255, 255, 255} : textFor(idleBackground);
         ccColor3B text = lerpC(idleText, textFor(pressBg), p);
         ccColor3B bg = lerpC(m_look.tile, pressBg, p);
         m_name->setColor(m_look.labelColor < 0 ? text : unpackC(m_look.labelColor));
@@ -1041,6 +1187,13 @@ public:
         }
         delete ret;
         return nullptr;
+    }
+
+    void setStatValue(int value) {
+        if (m_presses == value) return;
+        m_presses = value;
+        setCountText();
+        fitCount();
     }
 
     void setName(std::string const& name) {
@@ -1134,12 +1287,11 @@ public:
 
         float H = m_look.noteHeight;
         if (m_look.noteAutoY) H = std::clamp(m_noteSpace - m_noteStart, 0.f, H);
-        if (H < kCap) {
+        if (H <= 0.f) {
             clearNotes();
             return;
         }
         float sp = m_look.noteSpeed;
-        float minLen = std::max(kCap, m_look.noteMin);
 
         for (auto it = m_notes.begin(); it != m_notes.end();) {
             if (it->end >= 0 && (now - it->end) * sp >= H) {
@@ -1161,20 +1313,18 @@ public:
 
             double e = n.end < 0 ? now : n.end;
             float yb = static_cast<float>((now - e) * sp);
-            if (yb >= H) {
+            float len = holdNoteLength(n.start, e, sp, m_look.holdLengthScale, H - yb);
+            if (yb >= H || len < 0.05f) {
                 s.base->setVisible(false);
                 s.solid->setVisible(false);
+                s.linear->setVisible(false);
+                s.head->setVisible(false);
                 s.grad->setVisible(false);
                 s.glow->setVisible(false);
                 continue;
             }
-            float yt = static_cast<float>((now - n.start) * sp);
-            float len = std::max(minLen, yt - yb);
-            len = std::min(len, std::max(kCap, H - yb));
-
             float fade = std::pow(1.f - yb / H, std::max(0.f, m_look.noteFade));
-            // 모서리 이미지가 노트 길이의 1/8을 넘지 않게 해서 그라데이션이 매끄럽게 이어진다
-            float sN = std::clamp(noteR / kBaseR, 0.2f, std::max(0.2f, std::min(nw / kCap, len / 64.f)));
+            float sN = noteSpriteScale(noteR, nw, len);
             float py = baseY + yb;
             if (n.lw != nw || n.lh != len || n.ls != sN || n.lg != sg) {
                 n.lw = nw; n.lh = len; n.ls = sN; n.lg = sg;
@@ -1221,18 +1371,42 @@ struct LaneRef {
     KeyLane* lane = nullptr;
 };
 
+struct StatBox {
+    int metric;
+    CCPoint position;
+    float width;
+    float height;
+};
+
+static Look statLook(Look const& base, int metric) {
+    KeyDef style;
+    style.style = g_statSettings[metric];
+    style.bg = static_cast<int>(std::clamp(statValue(metric, "background", -1), -1., 16777215.));
+    auto border = static_cast<int>(std::clamp(statValue(metric, "rim", -1), -1., 16777215.));
+    style.border = border;
+    style.borderW = static_cast<float>(std::clamp(statValue(metric, "rim-width", 0), 0., 4.));
+    style.radius = static_cast<float>(std::clamp(statValue(metric, "roundness", 10), 0., 50.));
+    Look result = lookForKey(base, style);
+    result.timeline = false;
+    result.counter = true;
+    result.countArea = result.countDirection = 0;
+    result.countAlign = 1;
+    result.countGap = 2.f;
+    result.gradTile = result.idleGradient = statValue(metric, "idle-gradient", 0) != 0;
+    return result;
+}
+
 class KeyViewer : public CCLayer {
 protected:
     std::vector<LaneRef> m_lanes;
     std::vector<LaneGeo> m_geo;
-    CCLabelBMFont* m_info = nullptr;
+    std::array<KeyLane*, StatCount> m_stats{};
+    std::vector<StatBox> m_statGeo;
     CCLabelBMFont* m_hint = nullptr;
     CCDrawNode* m_frame = nullptr;
-    std::string m_infoStr;
     std::deque<double> m_hits;
     unsigned m_heldSources = 0;
     std::set<int> m_heldKeys;
-    bool m_koreanStats = false;
     int m_total = 0;
     int m_peak = 0;
     float m_refresh = 0.f;
@@ -1252,11 +1426,14 @@ protected:
         m_frame = CCDrawNode::create();
         this->addChild(m_frame, 5);
 
-        m_koreanStats = koreanUI();
-        m_info = CCLabelBMFont::create("", koreanUI() ? "ViewerUI.fnt"_spr : "InterBold.fnt"_spr);
-        m_info->setScale(0.38f);
-        m_info->setOpacity(190);
-        this->addChild(m_info);
+        loadStats();
+        for (int i = 0; i < StatCount; ++i) {
+            m_stats[i] = KeyLane::create(statName(i));
+            if (m_stats[i]) {
+                m_stats[i]->setVisible(false);
+                this->addChild(m_stats[i], 4);
+            }
+        }
 
         m_hint = CCLabelBMFont::create(uiText("DRAG TO MOVE").c_str(), koreanUI() ? "ViewerUI.fnt"_spr : "InterBold.fnt"_spr);
         m_hint->setScale(0.38f);
@@ -1341,6 +1518,7 @@ public:
         p.x = std::clamp(p.x, 0.f, win.width);
         p.y = std::clamp(p.y, 0.f, win.height);
         this->setPosition(p);
+        layoutStats(m_minX, m_maxX, m_minY, m_maxY);
     }
 
     void ccTouchEnded(CCTouch*, CCEvent*) override { this->finishDrag(); }
@@ -1374,6 +1552,71 @@ public:
         ccColor4F none = {0.f, 0.f, 0.f, 0.f};
         ccColor4F border = {1.f, 1.f, 1.f, 0.9f};
         m_frame->drawPolygon(v, 4, none, 1.f, border);
+    }
+
+    std::vector<StatBox> const& statGeo() const { return m_statGeo; }
+
+    void layoutStats(float minX, float maxX, float minY, float maxY) {
+        m_statGeo.clear();
+        auto win = CCDirector::get()->getWinSize();
+        auto origin = getPosition();
+        if (win.width <= 0 || win.height <= 0) return;
+        std::array<float, 4> distance{};
+        std::array<float, 4> extent{};
+        std::array<int, StatCount> anchors{};
+        std::array<float, StatCount> widths{}, heights{};
+        std::array<bool, StatCount> shown{};
+        float maxAutoWidth = 0.f;
+        for (int i = 0; i < StatCount; ++i) {
+            bool baseVisible = i == TotalMetric ? m_look.total : m_look.kps;
+            shown[i] = m_stats[i] && statValue(i, "visible", baseVisible) != 0;
+            widths[i] = static_cast<float>(std::clamp(statValue(i, "width", 45), 24., 200.));
+            heights[i] = static_cast<float>(std::clamp(statValue(i, "height", 27), 18., 100.));
+            anchors[i] = static_cast<int>(std::clamp(statValue(i, "anchor", 0), 0., 4.));
+            if (shown[i] && anchors[i] == 0) maxAutoWidth = std::max(maxAutoWidth, widths[i]);
+        }
+        float rightSpace = win.width - origin.x - maxX;
+        float leftSpace = origin.x + minX;
+        int automatic = rightSpace >= maxAutoWidth + 5.f ? 1 : leftSpace >= maxAutoWidth + 5.f ? 2 :
+            (origin.y + minY >= win.height - origin.y - maxY ? 3 : 4);
+        for (int i = 0; i < StatCount; ++i) {
+            if (!shown[i]) continue;
+            if (anchors[i] == 0) anchors[i] = automatic;
+            extent[anchors[i] - 1] += (anchors[i] <= 2 ? heights[i] : widths[i]) + 3.f;
+        }
+        for (int i = 0; i < StatCount; ++i) {
+            auto lane = m_stats[i];
+            if (!lane) continue;
+            lane->setVisible(shown[i]);
+            if (!shown[i]) continue;
+
+            float w = widths[i], h = heights[i];
+            int anchor = anchors[i];
+            float x, y;
+            if (anchor <= 2) {
+                x = anchor == 1 ? maxX + 5.f : minX - w - 5.f;
+                x = std::clamp(origin.x + x, 0.f, std::max(0.f, win.width - w)) - origin.x;
+                float stack = std::clamp(origin.y + maxY, std::min(win.height, extent[anchor - 1]), win.height);
+                y = stack - origin.y - h - distance[anchor - 1];
+                distance[anchor - 1] += h + 3.f;
+            } else {
+                float start = std::clamp(origin.x + minX, 0.f, std::max(0.f, win.width - extent[anchor - 1]));
+                x = start - origin.x + distance[anchor - 1];
+                y = anchor == 3 ? minY - h - 5.f : maxY + 5.f;
+                y = std::clamp(origin.y + y, 0.f, std::max(0.f, win.height - h)) - origin.y;
+                distance[anchor - 1] += w + 3.f;
+            }
+            float shiftX = static_cast<float>(std::clamp(statValue(i, "x", 0), -250., 250.));
+            float shiftY = static_cast<float>(std::clamp(statValue(i, "y", 0), -200., 200.));
+            CCPoint pos{x + shiftX, y + shiftY};
+            lane->setName(statName(i));
+            int values[StatCount] = {m_total, static_cast<int>(m_hits.size()), m_peak};
+            lane->setStatValue(values[i]);
+            lane->layout(statLook(m_look, i), w, h);
+            lane->setPosition(pos);
+            lane->tick(nowSec(), 0.f, 0.f);
+            m_statGeo.push_back({i, pos, w, h});
+        }
     }
 
     void applyLook() {
@@ -1422,13 +1665,13 @@ public:
         m_minX = minX; m_maxX = maxX; m_minY = minY; m_maxY = maxY;
 
         float cxm = (minX + maxX) / 2.f;
-        m_info->setPosition({cxm, minY - 10.f});
         m_hint->setPosition({cxm, maxY + 14.f});
 
         if (!m_dragging) {
             auto win = CCDirector::get()->getWinSize();
             this->setPosition({win.width * m_look.posX / 100.f, win.height * m_look.posY / 100.f});
         }
+        this->layoutStats(minX, maxX, minY, maxY);
         this->updateFrame();
     }
 
@@ -1527,17 +1770,12 @@ public:
         for (auto& r : m_lanes)
             if (r.lane->isVisible()) r.lane->tick(now, dt, top - r.lane->getPositionY());
 
-        std::string s;
-        if (m_look.kps) s += "KPS " + std::to_string(kps) + (m_koreanStats ? "  최고 " : "  MAX ") + std::to_string(m_peak);
-        if (m_look.total) {
-            if (!s.empty()) s += "   ";
-            s += (m_koreanStats ? "합계 " : "TOTAL ") + std::to_string(m_total);
+        int values[StatCount] = {m_total, kps, m_peak};
+        for (auto const& box : m_statGeo) {
+            auto lane = m_stats[box.metric];
+            lane->setStatValue(values[box.metric]);
+            lane->tick(now, dt, 0.f);
         }
-        if (s != m_infoStr) {
-            m_infoStr = s;
-            m_info->setString(s.c_str());
-        }
-        m_info->setVisible(!s.empty());
     }
 };
 
@@ -1656,6 +1894,8 @@ protected:
     bool m_mapMode = false;
     bool m_pendingRebuild = false;
     bool m_modal = false;
+    int m_statTab = 0;
+    std::string m_undoPreset;
 
     CCDrawNode* m_back = nullptr;
     CCDrawNode* m_chrome = nullptr;
@@ -1770,6 +2010,7 @@ protected:
                     m_scroll = 0.f;
                     this->redrawChrome();
                     this->rebuildInspector();
+                    this->redrawCanvas();
                 };
                 m_fixed.push_back(c);
             }
@@ -1906,9 +2147,16 @@ protected:
             minY = std::min(minY, g.y);
             maxY = std::max(maxY, g.y + g.h);
         }
+        if (m_tab == 2 || m_tab == 4) {
+            for (auto const& box : m_viewer->statGeo()) {
+                minX = std::min(minX, box.position.x);
+                maxX = std::max(maxX, box.position.x + box.width);
+                minY = std::min(minY, box.position.y);
+                maxY = std::max(maxY, box.position.y + box.height);
+            }
+        }
         float bw = std::max(20.f, maxX - minX), bh = std::max(20.f, maxY - minY);
-        float sc = std::min(kSc, std::min((cw - 40.f) / bw, (ch - 120.f) / bh));
-        sc = std::max(0.25f, sc);
+        float sc = std::min(kSc, std::min(std::max(8.f, cw - 24.f) / bw, std::max(8.f, ch - 114.f) / bh));
         m_fit.sc = sc;
         m_fit.ox = (cvX0 + cvX1) / 2.f - (minX + maxX) / 2.f * sc;
         m_fit.oy = cvY0 + 28.f - minY * sc;
@@ -1929,7 +2177,9 @@ protected:
 
     void setStatus(std::string const& s) {
         if (!m_status) return;
-        m_status->setString(uiText(s).c_str());
+        auto display = uiText(s);
+        setFont(m_status, koreanUI() ? 1 : 0, hasHangul(display));
+        m_status->setString(display.c_str());
         m_status->setScale(std::min(0.26f, (cvX1 - cvX0 - 12.f) / std::max(1.f, m_status->getContentSize().width)));
     }
 
@@ -2151,29 +2401,49 @@ protected:
 
     void drawNotePreview(Look const& look, float x, float y, float width, float zoom) {
         float w = std::max(kCap, width * look.noteWidth);
-        float h = std::clamp(look.noteHeight * 0.66f, kCap, 100.f);
         float radius = std::clamp(look.noteRadius * w, 1.5f, 16.f);
-        float rounding = std::clamp(radius / kBaseR, 0.2f,
-            std::max(0.2f, std::min(w / kCap, h / 64.f)));
         float glow = std::clamp(look.glowSize, 0.3f, 3.f);
         auto sample = CCNode::create();
-        auto sprites = createNoteSprites(sample);
-        if (!sprites.base) return;
         auto border = CCDrawNode::create();
         sample->addChild(border, 5);
         sample->setScale(zoom);
         sample->setPosition({x, y});
         m_notePreview->addChild(sample);
-        sizeNote(sprites, w, h, rounding, glow);
-        paintNote(sprites, border, look, (width - w) / 2.f, 5.f, w, h, rounding, glow, 1.f);
+        float bottom = 0.f;
+        for (double hold : {0.075, 0.032, 0.017}) {
+            float h = holdNoteLength(0.0, hold, look.noteSpeed, look.holdLengthScale, look.noteHeight - bottom);
+            if (h < 0.05f) break;
+            float rounding = noteSpriteScale(radius, w, h);
+            auto sprites = createNoteSprites(sample);
+            if (!sprites.base) break;
+            sizeNote(sprites, w, h, rounding, glow);
+            float fade = std::pow(1.f - bottom / look.noteHeight, std::max(0.f, look.noteFade));
+            paintNote(sprites, border, look, (width - w) / 2.f, look.noteBaseGap + bottom, w, h, rounding, glow, fade);
+            bottom += h + 7.f;
+        }
     }
 
     void redrawCanvas() {
         m_canvas->clear();
         m_counterPreview->removeAllChildrenWithCleanup(true);
         m_notePreview->removeAllChildrenWithCleanup(true);
+        if (!m_mapMode && m_dragMode == 0) updateFit();
+        if (!m_mapMode && (m_tab == 2 || m_tab == 4)) {
+            auto v = this->view();
+            auto base = readLook();
+            int samples[StatCount] = {1324, 12, 18};
+            for (auto const& stat : m_viewer->statGeo()) {
+                auto box = KeyLane::create(statName(stat.metric));
+                if (!box) continue;
+                box->layout(statLook(base, stat.metric), stat.width, stat.height);
+                box->setStatValue(samples[stat.metric]);
+                box->tick(nowSec(), 0.f, 0.f);
+                box->setPosition({v.ox + stat.position.x * v.sc, v.oy + stat.position.y * v.sc});
+                box->setScale(v.sc);
+                m_counterPreview->addChild(box);
+            }
+        }
         for (auto l : m_tileLabels) if (l) l->setVisible(false);
-        if (!m_mapMode && m_dragMode == 0) this->updateFit();
 
         Look base = readLook();
         View v = this->view();
@@ -2570,6 +2840,18 @@ protected:
         m_scrollCtls.push_back(c);
     }
 
+    void applyStylePreset(std::string const& data, std::string const& status) {
+        auto prior = serializePreset();
+        if (!applyPresetData(data)) {
+            setStatus("Invalid preset.");
+            return;
+        }
+        m_undoPreset = std::move(prior);
+        refreshAll(true);
+        m_pendingRebuild = true;
+        setStatus(Mod::get()->saveData().isOk() ? status : uiText("Preset storage failed."));
+    }
+
     // 사용자 프리셋 한 줄: 이름 + LOAD / SAVE / DEL
     void rowPresetEntry(int i) {
         int ri = beginRow(28.f);
@@ -2584,18 +2866,7 @@ protected:
 
         std::function<void()> actions[3];
         actions[0] = [this, i]() {
-            if (!applyPresetData(presetData(i))) {
-                setStatus("Invalid preset.");
-                return;
-            }
-            m_viewer->resetInput();
-            bool persisted = Mod::get()->saveData().isOk();
-            m_viewer->applyLook();
-            this->ensureSelection();
-            this->redrawCanvas();
-            m_pendingRebuild = true;
-            this->setStatus(persisted ? uiText("Loaded ") + presetName(i) : uiText("Preset storage failed."));
-            redrawChrome();
+            applyStylePreset(presetData(i), uiText("Loaded ") + presetName(i));
         };
         actions[1] = [this, i]() {
             presetSetData(i, serializePreset());
@@ -2622,6 +2893,11 @@ protected:
 
         auto nameLab = rowLabel(ri, presetName(i), 0.f, (y0 + y1) / 2.f, 0.30f, kWhite, 0.f);
         if (nameLab) {
+            auto name = presetName(i);
+            if (hasHangul(name)) {
+                setFont(nameLab, 0, true);
+                nameLab->setString(name.c_str());
+            }
             float lw = nameLab->getContentSize().width * 0.30f;
             float maxW = xs[0] - 6.f;
             if (lw > maxW && lw > 0.f) nameLab->setScale(0.30f * maxW / lw);
@@ -2834,6 +3110,8 @@ protected:
         settingSlider("Idle opacity", "tile-opacity", 0.f, 255.f, 1.f, true);
         settingToggle("Press glow", "show-glow");
         settingToggle("Key counters", "show-counter");
+        localToggle("Box gradient", "tile-idle-gradient", false);
+        settingColor("Gradient end color", "gradient-color");
         rowColor("Background color",
             [id]() { auto k = keyById(id); return k ? k->bg : -1; },
             [this, id](int v) { if (auto k = keyById(id)) k->bg = v; this->commitKey(id); }, true);
@@ -2858,7 +3136,8 @@ protected:
         localToggle("Auto Y correction", "note-auto-y", false);
         this->settingToggle("Note glow", "note-glow");
         this->settingSlider("Note width %", "note-width", 20.f, 100.f, 1.f);
-        this->settingSlider("Min length", "note-min-length", 2.f, 60.f, 1.f);
+        localSlider("Hold length scale %", "hold-length-scale", 25.f, 200.f, 5.f, 100.f);
+        localSlider("Gap above key", "note-base-gap", 0.f, 30.f, 1.f, 5.f);
         this->settingSlider("Speed", "note-speed", 100.f, 600.f, 5.f);
         this->settingSlider("Timeline length", "note-height", 40.f, 220.f, 5.f);
         rowChoice("Gradient colors", {"Off", "Notes", "Tile", "Both"},
@@ -2883,6 +3162,9 @@ protected:
             }
         });
         localToggle("Neon gradient", "neon-gradient", true);
+        localChoice("Gradient profile", "note-highlight-profile", {"Soft", "Linear", "Bright tip"}, 0);
+        localToggle("Reverse gradient", "gradient-reverse", false);
+        localSlider("Rim opacity %", "note-rim-opacity", 0.f, 100.f, 5.f, 96.f);
         localColor("Note gradient top", "note-gradient-top", 0xffffff, false);
         this->settingColor("Gradient end color", "gradient-color");
         this->settingSlider("Note opacity %", "note-opacity", 20.f, 100.f, 1.f);
@@ -2896,7 +3178,78 @@ protected:
         this->settingColor("Glow color", "note-glow-color");
     }
 
+    void updateStat(int metric, std::string const& key, double value) {
+        if (value < 0 && key != "x" && key != "y") g_statSettings[metric].erase(key);
+        else g_statSettings[metric][key] = value;
+        saveStat(metric);
+        refreshAll();
+    }
+
+    void statSlider(int metric, std::string label, std::string key, float min, float max, float step, float base) {
+        rowSlider(label, min, max, step, [metric, key, base] { return static_cast<float>(statValue(metric, key, base)); },
+            [this, metric, key](float value) { updateStat(metric, key, value); });
+    }
+
+    void statChoice(int metric, std::string label, std::string key, std::vector<std::string> choices, int base) {
+        rowCycle(label, std::move(choices), [metric, key, base] { return static_cast<int>(statValue(metric, key, base)); },
+            [this, metric, key](int value) { updateStat(metric, key, value); });
+    }
+
+    void statToggle(int metric, std::string label, std::string key, bool base) {
+        rowToggle(label, [metric, key, base] { return statValue(metric, key, base) != 0; },
+            [this, metric, key](bool value) { updateStat(metric, key, value); });
+    }
+
+    void statColor(int metric, std::string label, std::string key, int base, bool allowAuto = true) {
+        rowColor(label, [metric, key, base] { return static_cast<int>(statValue(metric, key, base)); },
+            [this, metric, key](int value) { updateStat(metric, key, value); }, allowAuto);
+    }
+
+    void buildStatOptions(int metric) {
+        auto base = readLook();
+        statToggle(metric, "Show box", "visible", metric == TotalMetric ? base.total : base.kps);
+        statChoice(metric, "Box language", "language", {"Same as editor", "Korean", "English"}, 0);
+        rowButton("Edit box title", {58, 58, 72}, [this, metric] {
+            showInput("Edit box title", statName(metric), false, [this, metric](std::string const& text) {
+                if (!validName(text)) return false;
+                g_statNames[metric] = text;
+                saveStat(metric);
+                refreshAll();
+                return true;
+            });
+        });
+        statChoice(metric, "Box anchor", "anchor", {"AUTO", "Right", "Left", "Below", "Above"}, 0);
+        statSlider(metric, "Position X", "x", -250.f, 250.f, 1.f, 0.f);
+        statSlider(metric, "Position Y", "y", -200.f, 200.f, 1.f, 0.f);
+        statSlider(metric, "Width", "width", 24.f, 200.f, 1.f, 45.f);
+        statSlider(metric, "Height", "height", 18.f, 100.f, 1.f, 27.f);
+        statColor(metric, "Background color", "background", -1);
+        statSlider(metric, "Idle opacity", "tile-opacity", 0.f, 255.f, 1.f, base.tileOpacity);
+        statSlider(metric, "Rounding %", "roundness", 0.f, 50.f, 1.f, 10.f);
+        statColor(metric, "Border color", "rim", -1);
+        statSlider(metric, "Border width", "rim-width", 0.f, 4.f, 0.25f, 0.f);
+        statToggle(metric, "Box gradient", "idle-gradient", false);
+        statColor(metric, "Gradient end color", "gradient-color", packC(base.gradEnd));
+        statChoice(metric, "Title font", "label-font", {"Inter", "Noto Sans", "GD Big", "GD Gold"}, 0);
+        statSlider(metric, "Title size", "label-size", 4.f, 40.f, 1.f, 10.f);
+        statColor(metric, "Title color", "label-color", -1);
+        statChoice(metric, "Value font", "count-font", {"Inter", "Noto Sans", "GD Big", "GD Gold"}, 0);
+        statSlider(metric, "Value size", "count-size", 4.f, 40.f, 1.f, 7.f);
+        statColor(metric, "Value color", "count-color", -1);
+    }
+
     void buildCounterTab() {
+        rowCycle("Edit counter", {"Key counters", "Total", "KPS", "Peak KPS"},
+            [this] { return m_statTab; }, [this](int index) {
+                m_statTab = index;
+                m_scroll = 0.f;
+                m_pendingRebuild = true;
+                redrawCanvas();
+            });
+        if (m_statTab > 0) {
+            buildStatOptions(m_statTab - 1);
+            return;
+        }
         rowInfo(uiText("Selected counter ") + describeKey(m_sel));
         settingToggle("Key counters", "show-counter");
         localChoice("Placement", "count-area", {"Inside", "Outside"}, 0);
@@ -2970,23 +3323,36 @@ protected:
         this->settingColor("Idle box color", "tile-color");
         this->settingColor("Pressed box color", "pressed-color");
         this->settingToggle("Press glow", "show-glow");
-        settingToggle("KPS", "show-kps");
-        settingToggle("Total presses", "show-total");
         settingToggle("Reset on restart", "reset-on-restart");
         this->settingSlider("Position X %", "pos-x", 0.f, 100.f, 1.f);
         this->settingSlider("Position Y %", "pos-y", 0.f, 100.f, 1.f);
     }
 
     void buildPresetTab() {
-        this->rowButton("Save current as new preset", ccColor3B{70, 110, 240}, [this]() {
-            presetAdd(serializePreset());
-            m_pendingRebuild = true;
-            this->setStatus(Mod::get()->saveData().isOk() ? "Saved a new preset." : "Preset storage failed.");
+        rowInfo("Reference photo presets");
+        for (int i = 0; i < 3; ++i) {
+            rowButton(kPhotoPresets[i], {58, 58, 72}, [this, i] {
+                applyStylePreset(photoPreset(i), uiText("Loaded ") + uiText(kPhotoPresets[i]));
+            });
+        }
+        if (!m_undoPreset.empty()) {
+            rowButton("Undo preset change", {58, 58, 72}, [this] {
+                auto previous = m_undoPreset;
+                applyStylePreset(previous, "Restored prior style.");
+            });
+        }
+        rowButton("Save style as preset", {70, 110, 240}, [this] {
+            showInput("Preset name", "", false, [this](std::string const& name) {
+                if (!validName(name)) return false;
+                presetAdd(serializePreset(), name);
+                setStatus(Mod::get()->saveData().isOk() ? "Saved a new preset." : "Preset storage failed.");
+                return true;
+            });
         });
         int n = presetCount();
-        if (n == 0) this->rowInfo("No presets yet.");
-        for (int i = 0; i < n; i++) this->rowPresetEntry(i);
-        this->rowInfo("A preset stores all settings and keys.");
+        if (n == 0) rowInfo("No presets yet.");
+        for (int i = 0; i < n; i++) rowPresetEntry(i);
+        rowInfo("Presets store appearance only.");
     }
 
     void rebuildInspector() {
@@ -3146,6 +3512,8 @@ public:
             if (auto next = KVEditor::create(m_viewer)) {
                 next->m_sel = m_sel;
                 next->m_tab = m_tab;
+                next->m_statTab = m_statTab;
+                next->m_undoPreset = m_undoPreset;
                 next->setMapMode(false);
                 getParent()->addChild(next, 100000);
                 removeFromParentAndCleanup(true);
@@ -3160,6 +3528,7 @@ public:
             m_closing = false;
             this->setPauseVisible(true);
             m_viewer->applyLook();
+            (void)Mod::get()->saveData();
             this->removeFromParentAndCleanup(true);
         }
     }

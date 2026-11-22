@@ -8,7 +8,7 @@
   },
   "id": "nonest.keyviewer",
   "name": "Key Viewer",
-  "version": "v0.9.2",
+  "version": "v0.9.3",
   "developer": "nonest",
   "description": "Dark, glowing key viewer with rising notes, gradient colors, add-able keys, user presets and an in-game editor opened from the pause menu.",
   "settings": {
@@ -43,14 +43,14 @@
     "show-kps": {
       "type": "bool",
       "default": true,
-      "name": "KPS Display",
-      "description": "Show keys per second and the max value."
+      "name": "Default KPS Box Visibility",
+      "description": "Default visibility for the KPS and peak KPS boxes."
     },
     "show-total": {
       "type": "bool",
       "default": true,
-      "name": "Total Presses",
-      "description": "Show the total number of presses."
+      "name": "Default Total Box Visibility",
+      "description": "Default visibility for the total presses box."
     },
     "show-glow": {
       "type": "bool",
@@ -217,17 +217,6 @@
       },
       "name": "Note Thickness (%)",
       "description": "Note width relative to the box width. 100 matches the box."
-    },
-    "note-min-length": {
-      "type": "float",
-      "default": 18.0,
-      "min": 2.0,
-      "max": 60.0,
-      "control": {
-        "slider": true
-      },
-      "name": "Note Min Length",
-      "description": "Even a quick tap is drawn at least this long."
     },
     "note-speed": {
       "type": "float",
