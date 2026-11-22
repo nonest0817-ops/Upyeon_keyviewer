@@ -1,3 +1,10 @@
+# v0.9.2
+
+- Type individual key names, including Hangul.
+- Align visible keys horizontally or vertically and space them evenly.
+- Choose colors with a visual picker.
+- Apply a neon gradient with a bright rim and colored glow.
+
 # v0.9.1
 
 - Scroll the editor with the mouse wheel and move the overlay vertically in Map mode.

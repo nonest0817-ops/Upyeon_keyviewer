@@ -4,6 +4,7 @@
 #include <Geode/modify/PauseLayer.hpp>
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <Geode/ui/Popup.hpp>
+#include <Geode/ui/ColorPickPopup.hpp>
 #include <Geode/ui/TextInput.hpp>
 #include <array>
 #include <set>
@@ -95,6 +96,70 @@ static std::vector<std::string> splitStr(std::string const& s, char sep) {
 static std::string cleanStr(std::string s) {
     for (auto& c : s) if (c == ',' || c == ';') c = '_';
     return s;
+}
+
+// Preserve commas and semicolons in user names in the legacy preset container.
+static std::string encodeName(std::string const& name) {
+    std::string result;
+    for (unsigned char byte : name) {
+        result += "0123456789ABCDEF"[byte >> 4];
+        result += "0123456789ABCDEF"[byte & 15];
+    }
+    return result;
+}
+
+static std::string decodeName(std::string const& encoded) {
+    constexpr std::string_view digits = "0123456789ABCDEF";
+    if (encoded.size() > 144 || encoded.size() % 2) return {};
+    std::string name;
+    for (size_t i = 0; i < encoded.size(); i += 2) {
+        auto high = digits.find(encoded[i]), low = digits.find(encoded[i + 1]);
+        if (high == digits.npos || low == digits.npos || (high == 0 && low == 0)) return {};
+        name += static_cast<char>(high * 16 + low);
+    }
+    return name;
+}
+
+static bool hasHangul(std::string_view text) {
+    return std::any_of(text.begin(), text.end(), [](unsigned char byte) { return byte >= 0x80; });
+}
+
+static std::string const& nameCharacters() {
+    static const auto supported = [] {
+        std::string result;
+        for (int code = 32; code < 127; ++code) result += static_cast<char>(code);
+        auto addHangul = [&](int first, int last) {
+            for (int code = first; code <= last; ++code) {
+                result += static_cast<char>(0xe0 | (code >> 12));
+                result += static_cast<char>(0x80 | ((code >> 6) & 63));
+                result += static_cast<char>(0x80 | (code & 63));
+            }
+        };
+        addHangul(0x3131, 0x318e);
+        addHangul(0xac00, 0xd7a3);
+        return result;
+    }();
+    return supported;
+}
+
+static bool validName(std::string_view name) {
+    size_t count = 0;
+    for (size_t i = 0; i < name.size();) {
+        unsigned char first = name[i];
+        if (++count > 24) return false;
+        if (first >= 32 && first < 127) {
+            ++i;
+        } else if (first >= 0xe0 && first < 0xf0 && i + 2 < name.size()) {
+            unsigned char second = name[i + 1], third = name[i + 2];
+            if ((second & 0xc0) != 0x80 || (third & 0xc0) != 0x80) return false;
+            int code = (first & 15) * 4096 + (second & 63) * 64 + (third & 63);
+            if (!(code >= 0x3131 && code <= 0x318e) && !(code >= 0xac00 && code <= 0xd7a3)) return false;
+            i += 3;
+        } else {
+            return false;
+        }
+    }
+    return true;
 }
 
 static void setOp(CCScale9Sprite* sp, float a) {
@@ -195,6 +260,8 @@ struct Look {
     ccColor3B gradEnd = {255, 140, 230};
     bool gradNotes = false;
     bool gradTile = false;
+    bool neonGradient = true;
+    ccColor3B noteGradTop = {255, 255, 255};
     std::string labelJump = "JUMP";
     std::string labelLeft = "<";
     std::string labelRight = ">";
@@ -470,6 +537,8 @@ static Look lookForKey(Look const& base, KeyDef const& k) {
         if (key == "label-font") kl.labelFont = static_cast<int>(std::clamp(v, 0., 3.));
         if (key == "label-size") kl.labelSize = static_cast<float>(std::clamp(v, 4., 40.));
         if (key == "label-color") kl.labelColor = static_cast<int>(std::clamp(v, 0., 16777215.));
+        if (key == "neon-gradient") kl.neonGradient = v != 0;
+        if (key == "note-gradient-top") kl.noteGradTop = unpackC(static_cast<int>(std::clamp(v, 0., 16777215.)));
         if (key == "note-auto-y") kl.noteAutoY = v != 0;
         if (key == "count-area") kl.countArea = static_cast<int>(std::clamp(v, 0., 1.));
         if (key == "count-direction") kl.countDirection = static_cast<int>(std::clamp(v, 0., 3.));
@@ -582,7 +651,7 @@ static std::string serializePreset() {
         out += "K," + std::to_string(k.id) + "," + std::to_string(k.map) + "," + numStr(k.x) + "," +
                numStr(k.y) + "," + numStr(k.w) + "," + numStr(k.h) + "," + std::to_string(k.bg) + "," +
                std::to_string(k.pressed) + "," + std::to_string(k.border) + "," + std::to_string(k.accent) + "," +
-               numStr(k.borderW) + "," + numStr(k.radius) + "," + std::to_string(k.label) + "," + encodeStyle(k.style) + "," + cleanStr(k.text) + ";";
+               numStr(k.borderW) + "," + numStr(k.radius) + "," + std::to_string(k.label) + "," + encodeStyle(k.style) + ",," + encodeName(k.text) + ";";
     }
     return out;
 }
@@ -609,7 +678,9 @@ static bool applyPresetData(std::string const& data) {
             k.radius = static_cast<float>(std::atof(f[12].c_str()));
             k.label = std::clamp(std::atoi(f[13].c_str()), 0, kLabelCount - 1);
             if (f.size() >= 15) k.style = decodeStyle(f[14]);
-            if (f.size() >= 16) k.text = f[15].substr(0, 24);
+            if (f.size() >= 17) k.text = decodeName(f[16]);
+            else if (f.size() >= 16) k.text = f[15].substr(0, 24);
+            if (!validName(k.text)) return false;
             if (k.id < 0 || k.id == INT32_MAX || !std::isfinite(k.x) || !std::isfinite(k.y) ||
                 !std::isfinite(k.w) || !std::isfinite(k.h) ||
                 std::any_of(keys.begin(), keys.end(), [&](KeyDef const& prior) { return prior.id == k.id; }))
@@ -685,8 +756,8 @@ static std::array<char const*, 4> const kFonts = {
     "InterBold.fnt"_spr, "ViewerUI.fnt"_spr, "bigFont.fnt", "goldFont.fnt"
 };
 
-static void setFont(CCLabelBMFont* label, int font) {
-    auto file = kFonts[font];
+static void setFont(CCLabelBMFont* label, int font, bool hangul = false) {
+    auto file = hangul ? "KeyNames.fnt"_spr : kFonts[font];
     auto current = label->getFntFile();
     if (!current || std::string_view(current) != file) label->setFntFile(file);
 }
@@ -726,7 +797,72 @@ struct NoteSprites {
     CCScale9Sprite* glow = nullptr;
     CCScale9Sprite* base = nullptr;
     CCScale9Sprite* grad = nullptr;
+    CCScale9Sprite* solid = nullptr;
 };
+
+static NoteSprites createNoteSprites(CCNode* parent) {
+    NoteSprites s;
+    s.glow = CCScale9Sprite::create("kv_glow.png"_spr);
+    s.base = CCScale9Sprite::create("kv_fade2.png"_spr);
+    s.grad = CCScale9Sprite::create("kv_grad2.png"_spr);
+    s.solid = CCScale9Sprite::create("kv_solid.png"_spr);
+    if (!s.glow || !s.base || !s.grad || !s.solid) return {};
+    parent->addChild(s.glow, 0);
+    parent->addChild(s.base, 1);
+    parent->addChild(s.solid, 1);
+    parent->addChild(s.grad, 2);
+    return s;
+}
+
+static bool neonNote(Look const& look) {
+    return look.gradNotes && look.neonGradient;
+}
+
+static void sizeNote(NoteSprites const& s, float w, float h, float rounding, float glowScale) {
+    float pad = kGlowPad * glowScale;
+    fitSize(s.base, w, h, rounding);
+    fitSize(s.solid, w, h, rounding);
+    fitSize(s.grad, w, h, rounding);
+    fitSize(s.glow, w + 2 * pad, h + 2 * pad, glowScale);
+}
+
+static void paintNote(NoteSprites const& s, CCDrawNode* border, Look const& look,
+                      float x, float y, float w, float h, float rounding, float glowScale, float fade) {
+    bool neon = neonNote(look);
+    float pad = kGlowPad * glowScale;
+    float opacity = std::clamp(look.noteOpacity, 0.05f, 1.f) * fade;
+    auto accent = look.accentJump;
+    auto top = neon ? look.noteGradTop : look.gradEnd;
+    auto fill = neon ? s.solid : s.base;
+    s.base->setVisible(!neon);
+    s.solid->setVisible(neon);
+    placeCenter(fill, x, y, w, h);
+    fill->setColor(accent);
+    setOp(fill, opacity);
+    s.grad->setVisible(look.gradNotes);
+    if (look.gradNotes) {
+        placeCenter(s.grad, x, y, w, h);
+        s.grad->setColor(top);
+        setOp(s.grad, opacity);
+    }
+
+    bool glow = look.noteGlow && look.glowStrength > 0.01f;
+    s.glow->setVisible(glow);
+    if (glow) {
+        auto glowColor = look.glowCustom ? look.glowColor : accent;
+        if (!neon && !look.glowCustom && look.gradNotes) glowColor = lerpC(accent, top, 0.5f);
+        placeCenter(s.glow, x - pad, y - pad, w + 2 * pad, h + 2 * pad);
+        s.glow->setColor(glowColor);
+        setOp(s.glow, (neon ? 0.75f : 0.45f) * look.glowStrength * fade);
+    }
+
+    if (look.noteBorder > 0.f || neon) {
+        float thickness = look.noteBorder > 0.f ? look.noteBorder : std::clamp(w * 0.035f, 0.55f, 1.4f);
+        auto edge = look.noteBorder > 0.f ? look.noteBorderColor : lerpC(accent, {255, 255, 255}, 0.80f);
+        float edgeOpacity = neon ? fade * 0.96f : std::min(1.f, opacity + 0.15f);
+        dnStrokeA(border, x, y, x + w, y + h, rounding * kBaseR, edge, thickness, edgeOpacity, 4);
+    }
+}
 
 struct Note {
     int source = 0;
@@ -784,7 +920,7 @@ protected:
         m_border = CCDrawNode::create();
         this->addChild(m_border, 2);
 
-        m_name = CCLabelBMFont::create(name.c_str(), "InterBold.fnt"_spr);
+        m_name = CCLabelBMFont::create(name.c_str(), hasHangul(name) ? "KeyNames.fnt"_spr : "InterBold.fnt"_spr);
         this->addChild(m_name, 3);
 
         m_count = CCLabelBMFont::create("0", "InterBold.fnt"_spr);
@@ -806,21 +942,14 @@ protected:
             m_pool.pop_back();
             return s;
         }
-        NoteSprites s;
-        s.glow = CCScale9Sprite::create("kv_glow.png"_spr);
-        s.base = CCScale9Sprite::create("kv_fade2.png"_spr);
-        s.grad = CCScale9Sprite::create("kv_grad2.png"_spr);
-        if (!s.glow || !s.base || !s.grad) return NoteSprites{};
-        m_noteLayer->addChild(s.glow, 0);
-        m_noteLayer->addChild(s.base, 1);
-        m_noteLayer->addChild(s.grad, 2);
-        return s;
+        return createNoteSprites(m_noteLayer);
     }
 
     void release(NoteSprites const& s) {
         if (!s.base) return;
         s.glow->setVisible(false);
         s.base->setVisible(false);
+        s.solid->setVisible(false);
         s.grad->setVisible(false);
         m_pool.push_back(s);
     }
@@ -917,6 +1046,7 @@ public:
     void setName(std::string const& name) {
         if (name == m_nameStr) return;
         m_nameStr = name;
+        setFont(m_name, m_look.labelFont, hasHangul(name));
         m_name->setString(name.c_str());
     }
 
@@ -938,7 +1068,7 @@ public:
         placeCenter(m_tileGrad, 0.f, 0.f, m_w, m_h);
         placeCenter(m_glow, -kGlowPad, -kGlowPad, m_w + 2 * kGlowPad, m_h + 2 * kGlowPad);
 
-        setFont(m_name, l.labelFont);
+        setFont(m_name, l.labelFont, hasHangul(m_nameStr));
         setFont(m_count, l.countFont);
         for (auto border : m_countOutline) setFont(border, l.countFont);
         m_name->setScale(labelScale(m_name, l.labelSize, m_w * 0.84f));
@@ -1025,12 +1155,6 @@ public:
         float x0 = (m_w - nw) / 2.f;
         float noteR = std::clamp(m_look.noteRadius * nw, 1.5f, 16.f);
         float sg = std::clamp(m_look.glowSize, 0.3f, 3.f);
-        float baseOp = std::clamp(m_look.noteOpacity, 0.05f, 1.f);
-        auto acc = this->accent();
-        bool grad = m_look.gradNotes;
-        ccColor3B glowCol = m_look.glowCustom ? m_look.glowColor
-                                              : (grad ? lerpC(acc, m_look.gradEnd, 0.5f) : acc);
-
         for (auto& n : m_notes) {
             auto& s = n.sp;
             if (!s.base) continue;
@@ -1039,6 +1163,7 @@ public:
             float yb = static_cast<float>((now - e) * sp);
             if (yb >= H) {
                 s.base->setVisible(false);
+                s.solid->setVisible(false);
                 s.grad->setVisible(false);
                 s.glow->setVisible(false);
                 continue;
@@ -1051,40 +1176,11 @@ public:
             // 모서리 이미지가 노트 길이의 1/8을 넘지 않게 해서 그라데이션이 매끄럽게 이어진다
             float sN = std::clamp(noteR / kBaseR, 0.2f, std::max(0.2f, std::min(nw / kCap, len / 64.f)));
             float py = baseY + yb;
-            float pad = kGlowPad * sg;
-
             if (n.lw != nw || n.lh != len || n.ls != sN || n.lg != sg) {
                 n.lw = nw; n.lh = len; n.ls = sN; n.lg = sg;
-                fitSize(s.base, nw, len, sN);
-                fitSize(s.grad, nw, len, sN);
-                fitSize(s.glow, nw + 2 * pad, len + 2 * pad, sg);
+                sizeNote(s, nw, len, sN, sg);
             }
-            placeCenter(s.base, x0, py, nw, len);
-            placeCenter(s.grad, x0, py, nw, len);
-            placeCenter(s.glow, x0 - pad, py - pad, nw + 2 * pad, len + 2 * pad);
-
-            float op = baseOp * fade;
-            s.base->setVisible(true);
-            s.base->setColor(acc);
-            setOp(s.base, op);
-
-            s.grad->setVisible(grad);
-            if (grad) {
-                s.grad->setColor(m_look.gradEnd);
-                setOp(s.grad, op);
-            }
-
-            bool gl = m_look.noteGlow && m_look.glowStrength > 0.01f;
-            s.glow->setVisible(gl);
-            if (gl) {
-                s.glow->setColor(glowCol);
-                setOp(s.glow, 0.45f * m_look.glowStrength * fade);
-            }
-
-            if (m_look.noteBorder > 0.f) {
-                dnStrokeA(m_noteBorder, x0, py, x0 + nw, py + len, sN * kBaseR,
-                          m_look.noteBorderColor, m_look.noteBorder, std::min(1.f, op + 0.15f), 4);
-            }
+            paintNote(s, m_noteBorder, m_look, x0, py, nw, len, sN, sg, fade);
         }
     }
 
@@ -1450,12 +1546,6 @@ public:
 // 왼쪽 캔버스: 키를 눌러 선택(파란 테두리), 끌어서 이동, 손잡이로 크기 조절
 // 오른쪽: 탭별 설정. 아래: 키 추가/삭제, 지도 배치 모드, 미리보기 등
 // ---------------------------------------------------------------
-static ccColor3B const kPalette[12] = {
-    {255, 255, 255}, {226, 226, 232}, {140, 140, 150}, {18, 18, 22},
-    {255, 80, 90},   {255, 160, 60},  {255, 230, 90},  {110, 230, 120},
-    {80, 220, 255},  {90, 130, 255},  {170, 110, 255}, {255, 120, 200}
-};
-
 static ccColor3B const kBlue = {90, 140, 255};
 static ccColor3B const kWhite = {255, 255, 255};
 
@@ -1529,10 +1619,10 @@ public:
             popup->setKeyboardEnabled(true);
             mkLabel(popup->m_mainLayer, "Press a keyboard key", 0.42f, kWhite, {120.f, 55.f}, 0.5f);
         } else {
-            popup->m_field = geode::TextInput::create(172.f, "");
+            popup->m_field = geode::TextInput::create(172.f, "", numeric ? "bigFont.fnt" : "KeyNames.fnt"_spr);
             popup->m_field->setPosition({120.f, 64.f});
-            popup->m_field->setMaxCharCount(numeric ? 9 : 24);
-            popup->m_field->setFilter(numeric ? "0123456789-." : "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 !#$%&()+-./:<=>?@[]_");
+            popup->m_field->setMaxCharCount(numeric ? 9 : 72);
+            popup->m_field->setFilter(numeric ? std::string("0123456789-.") : nameCharacters());
             popup->m_field->setString(value.c_str());
             popup->m_mainLayer->addChild(popup->m_field);
             popup->m_hint = mkLabel(popup->m_mainLayer, "", 0.30f, kWhite, {120.f, 41.f}, 0.5f);
@@ -1580,6 +1670,7 @@ protected:
     CCLabelBMFont* m_tabLabels[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
     std::vector<CCLabelBMFont*> m_tileLabels;
     CCNode* m_counterPreview = nullptr;
+    CCNode* m_notePreview = nullptr;
     std::vector<Btn> m_btns, m_mapBtns;
 
     std::vector<Ctl> m_fixed, m_scrollCtls;
@@ -1627,6 +1718,8 @@ protected:
         this->addChild(m_canvas, 2);
         m_canvasLabels = CCNode::create();
         this->addChild(m_canvasLabels, 3);
+        m_notePreview = CCNode::create();
+        m_canvasLabels->addChild(m_notePreview);
         m_counterPreview = CCNode::create();
         m_canvasLabels->addChild(m_counterPreview);
         auto clip = CCClippingNode::create();
@@ -1943,6 +2036,8 @@ protected:
         KeyDef d;
         d.id = k->id;
         d.map = k->map;
+        d.label = k->label;
+        d.text = k->text;
         if (auto it = k->style.find("key-code"); it != k->style.end()) d.style.insert(*it);
         d.x = k->x;
         d.y = k->y;
@@ -2054,9 +2149,29 @@ protected:
         m_counterPreview->addChild(sample, 1);
     }
 
+    void drawNotePreview(Look const& look, float x, float y, float width, float zoom) {
+        float w = std::max(kCap, width * look.noteWidth);
+        float h = std::clamp(look.noteHeight * 0.66f, kCap, 100.f);
+        float radius = std::clamp(look.noteRadius * w, 1.5f, 16.f);
+        float rounding = std::clamp(radius / kBaseR, 0.2f,
+            std::max(0.2f, std::min(w / kCap, h / 64.f)));
+        float glow = std::clamp(look.glowSize, 0.3f, 3.f);
+        auto sample = CCNode::create();
+        auto sprites = createNoteSprites(sample);
+        if (!sprites.base) return;
+        auto border = CCDrawNode::create();
+        sample->addChild(border, 5);
+        sample->setScale(zoom);
+        sample->setPosition({x, y});
+        m_notePreview->addChild(sample);
+        sizeNote(sprites, w, h, rounding, glow);
+        paintNote(sprites, border, look, (width - w) / 2.f, 5.f, w, h, rounding, glow, 1.f);
+    }
+
     void redrawCanvas() {
         m_canvas->clear();
         m_counterPreview->removeAllChildrenWithCleanup(true);
+        m_notePreview->removeAllChildrenWithCleanup(true);
         for (auto l : m_tileLabels) if (l) l->setVisible(false);
         if (!m_mapMode && m_dragMode == 0) this->updateFit();
 
@@ -2074,16 +2189,7 @@ protected:
             float x1 = x0 + w, y1 = y0 + h;
             float r = std::min(std::max(kl.radius * h, 2.f), std::min(w, h) / 2.f);
 
-            // 노트 모양 미리보기 (창 모드에서만)
-            if (!m_mapMode && kl.timeline) {
-                ccColor3B acc = kl.accentJump;
-                float nw = std::clamp(kl.noteWidth, 0.2f, 1.f) * w;
-                float nx0 = x0 + (w - nw) / 2.f;
-                float nr = std::clamp(kl.radius * h * 0.7f, 2.f, 9.f);
-                dnRound(m_canvas, nx0, y1 + 6.f, nx0 + nw, y1 + 34.f, nr, acc, 0.85f, 3);
-                dnRound(m_canvas, nx0, y1 + 42.f, nx0 + nw, y1 + 56.f, nr, acc, 0.55f, 3);
-                dnRound(m_canvas, nx0, y1 + 64.f, nx0 + nw, y1 + 70.f, 3.f, acc, 0.3f, 2);
-            }
+            if (!m_mapMode && kl.timeline && g.id == m_sel) drawNotePreview(kl, x0, y1, g.w, v.sc);
 
             bool pressed = m_previewPressed;
             ccColor3B fill = pressed ? kl.pressed : kl.tile;
@@ -2109,7 +2215,7 @@ protected:
 
             auto lab = this->tileLabel(li++);
             if (lab) {
-                setFont(lab, kl.labelFont);
+                setFont(lab, kl.labelFont, hasHangul(g.name));
                 lab->setString(g.name.c_str());
                 float sc = labelScale(lab, kl.labelSize * v.sc, w * 0.84f);
                 lab->setScale(sc);
@@ -2355,75 +2461,46 @@ protected:
     }
 
     void rowColor(std::string const& label, std::function<int()> get, std::function<void(int)> set, bool allowAuto) {
-        int ri = beginRow(36.f);
-        float top = m_rows[ri].top;
-        float w = m_inW;
-        rowLabel(ri, label, 0.f, top - 8.f, 0.25f, ccColor3B{235, 235, 240}, 0.f);
-        auto d = rowDraw(ri);
-        int n = allowAuto ? 13 : 12;
-        float cell = w / n;
-        float sw = cell - 2.f;
-        float y0 = top - 31.f;
-        if (allowAuto) rowLabel(ri, "A", cell / 2.f, y0 + sw / 2.f, 0.26f, ccColor3B{200, 200, 210}, 0.5f);
+        int row = beginRow(40.f);
+        float top = m_rows[row].top;
+        float width = m_inW;
+        rowLabel(row, label, 0.f, top - 8.f, 0.30f, kWhite, 0.f);
+        int color = get();
+        float swatchRight = allowAuto ? width * 0.64f : width;
+        auto draw = rowDraw(row);
+        ccColor3B swatch = color < 0 ? ccColor3B{58, 58, 72} : unpackC(color);
+        dnRound(draw, 0.f, top - 35.f, swatchRight, top - 17.f, 4.f, swatch, 1.f, 3);
+        rowLabel(row, "Choose color", swatchRight / 2.f, top - 26.f, 0.28f, textFor(swatch), 0.5f);
 
-        auto hex = rowLabel(ri, "", w, top - 8.f, 0.28f, kWhite, 1.f);
-        auto refresh = [=]() {
-            d->clear();
-            int cur = get();
-            char value[12];
-            if (cur < 0) std::snprintf(value, sizeof value, "AUTO");
-            else std::snprintf(value, sizeof value, "#%06X", unsigned(cur) & 0xffffffu);
-            if (hex) hex->setString(uiText(value).c_str());
-            for (int i = 0; i < n; i++) {
-                float x0 = i * cell + 1.f;
-                bool isAuto = allowAuto && i == 0;
-                ccColor3B col = isAuto ? ccColor3B{50, 50, 60} : kPalette[i - (allowAuto ? 1 : 0)];
-                dnRound(d, x0, y0, x0 + sw, y0 + sw, 3.f, col, 1.f, 3);
-                bool sel = isAuto ? (cur < 0) : (cur == packC(col));
-                if (sel) dnStroke(d, x0 - 1.f, y0 - 1.f, x0 + sw + 1.f, y0 + sw + 1.f, 4.f, kBlue, 1.5f, 3);
-            }
+        Ctl choose;
+        choose.row = row;
+        choose.r = CCRect(0.f, top - 36.f, swatchRight, 20.f);
+        choose.down = [this, get, set](CCPoint) {
+            int color = get();
+            auto picker = geode::ColorPickPopup::create(color < 0 ? ccColor3B{255, 255, 255} : unpackC(color));
+            if (!picker) return;
+            m_modal = true;
+            picker->setCallback([this, set](ccColor4B const& picked) {
+                set(packC({picked.r, picked.g, picked.b}));
+                m_modal = false;
+                m_pendingRebuild = true;
+            });
+            picker->show();
         };
-        refresh();
+        m_scrollCtls.push_back(choose);
+        if (!allowAuto) return;
 
-        Ctl c;
-        c.scroll = true;
-        c.row = ri;
-        c.r = CCRect(0.f, top - 36.f, w, 30.f);
-        c.down = [=, this](CCPoint p) {
-            int i = std::clamp(static_cast<int>(p.x / cell), 0, n - 1);
-            if (allowAuto && i == 0) set(-1);
-            else set(packC(kPalette[i - (allowAuto ? 1 : 0)]));
-            refresh();
+        dnRound(draw, swatchRight + 3.f, top - 35.f, width, top - 17.f, 4.f,
+                color < 0 ? kBlue : ccColor3B{58, 58, 72}, 1.f, 3);
+        rowLabel(row, "AUTO", (swatchRight + 3.f + width) / 2.f, top - 26.f, 0.28f, kWhite, 0.5f);
+        Ctl reset;
+        reset.row = row;
+        reset.r = CCRect(swatchRight + 3.f, top - 36.f, width - swatchRight - 3.f, 20.f);
+        reset.down = [this, set](CCPoint) {
+            set(-1);
             m_pendingRebuild = true;
         };
-        m_scrollCtls.push_back(c);
-        int digits = beginRow(24.f);
-        auto digitBar = rowDraw(digits);
-        float topY = m_rows[digits].top;
-        float buttonW = w / 7.f;
-        for (int digit = 0; digit < 6; ++digit) {
-            float x = (digit + 1) * buttonW;
-            dnRound(digitBar, x, topY - 21.f, x + buttonW - 2.f, topY - 2.f, 3.f,
-                    {58, 58, 72}, 1.f, 3);
-            int shift = (5 - digit) * 4;
-            auto number = rowLabel(digits, "", x + buttonW / 2.f, topY - 12.f, 0.28f, kWhite, 0.5f);
-            int color = std::max(get(), 0);
-            if (number) number->setString(std::string(1, "0123456789ABCDEF"[(color >> shift) & 15]).c_str());
-            Ctl field;
-            field.row = digits;
-            field.scroll = true;
-            field.r = CCRect(x, topY - 23.f, buttonW, 23.f);
-            field.down = [=, this](CCPoint) {
-                int current = std::max(get(), 0);
-                int next = (((current >> shift) + 1) & 15) << shift;
-                set((current & ~(15 << shift)) | next);
-                m_pendingRebuild = true;
-            };
-            m_scrollCtls.push_back(field);
-        }
-        dnRound(digitBar, 1.f, topY - 20.f, buttonW - 3.f, topY - 3.f, 3.f,
-                unpackC(std::max(get(), 0)), 1.f, 3);
-
+        m_scrollCtls.push_back(reset);
     }
 
     void rowToggle(std::string const& label, std::function<bool()> get, std::function<void(bool)> set) {
@@ -2714,15 +2791,20 @@ protected:
                 if (auto k = keyById(id)) k->map = std::clamp(v, 0, 5);
                 this->commitKey(id);
             });
-        std::vector<std::string> labels(kLabels, kLabels + kLabelCount);
-        rowCycle("Label", labels,
-            [id]() { auto k = keyById(id); return k ? k->label : 0; },
-            [this, id](int v) {
-                if (auto k = keyById(id)) k->label = std::clamp(v, 0, kLabelCount - 1);
-                this->commitKey(id);
-            });
         auto key = keyById(id);
         if (!key) return;
+        rowButton("Edit key name", {70, 110, 240}, [this, id] {
+            if (auto key = keyById(id)) showInput("Edit key name", labelFor(*key, readLook()), false,
+                [this, id](std::string const& name) {
+                    if (!validName(name)) return false;
+                    if (auto key = keyById(id)) {
+                        key->text = name;
+                        key->label = 0;
+                        commitKey(id);
+                    }
+                    return true;
+                });
+        });
         int code = lookForKey(readLook(), *key).keyCode;
         rowInfo(code ? uiText("Bound key ") + keyName(code) : uiText("Game action input"));
         rowButton("Bind keyboard key", {70, 110, 240}, [this, id] {
@@ -2739,15 +2821,6 @@ protected:
         geometryRow("Position", {"X", "Y"}, id, {&KeyDef::x, &KeyDef::y}, {-500.f, -300.f}, {500.f, 300.f});
         geometryRow("Size", {"W", "H"}, id, {&KeyDef::w, &KeyDef::h}, {0.f, 0.f}, {500.f, 500.f});
         rowInfo("Size 0 uses the default.");
-        rowButton(key->text.empty() ? "Set custom text" : uiText("Text ") + key->text, {58, 58, 72}, [this, id] {
-            if (auto key = keyById(id)) showInput("Set custom text", key->text, false, [this, id](std::string const& text) {
-                if (auto k = keyById(id)) {
-                    k->text = cleanStr(text.substr(0, 24));
-                    commitKey(id);
-                }
-                return true;
-            });
-        });
         fontChoice("label-font");
         localSlider("Font size", "label-size", 4.f, 40.f, 1.f, 10.f);
         localColor("Font color", "label-color", -1, true);
@@ -2761,7 +2834,6 @@ protected:
         settingSlider("Idle opacity", "tile-opacity", 0.f, 255.f, 1.f, true);
         settingToggle("Press glow", "show-glow");
         settingToggle("Key counters", "show-counter");
-        rowInfo("Hex: tap a digit to change it.");
         rowColor("Background color",
             [id]() { auto k = keyById(id); return k ? k->bg : -1; },
             [this, id](int v) { if (auto k = keyById(id)) k->bg = v; this->commitKey(id); }, true);
@@ -2779,7 +2851,6 @@ protected:
             int ri = beginRow(18.f);
             rowLabel(ri, uiText("NOTES  ") + describeKey(id), 0.f, m_rows[ri].top - 9.f, 0.32f, kWhite, 0.f);
         }
-        rowInfo("Hex: tap a digit to change it.");
         rowColor("Note color (this key)",
             [id]() { auto k = keyById(id); return k ? k->accent : -1; },
             [this, id](int v) { if (auto k = keyById(id)) k->accent = v; this->commitKey(id); }, true);
@@ -2799,6 +2870,20 @@ protected:
             [this, id](int i) {
                 writeStyle(id, "gradient-mode", i);
             });
+        rowButton("Apply neon gradient", {70, 110, 240}, [this, id] {
+            if (auto key = keyById(id)) {
+                key->style["gradient-mode"] = 1;
+                key->style["show-timeline"] = 1;
+                key->style["neon-gradient"] = 1;
+                key->style["note-glow"] = 1;
+                key->style["note-gradient-top"] = 0xffffff;
+                if (packC(lookForKey(readLook(), *key).accentJump) == 0xffffff) key->accent = 0xff293b;
+                commitKey(id);
+                m_pendingRebuild = true;
+            }
+        });
+        localToggle("Neon gradient", "neon-gradient", true);
+        localColor("Note gradient top", "note-gradient-top", 0xffffff, false);
         this->settingColor("Gradient end color", "gradient-color");
         this->settingSlider("Note opacity %", "note-opacity", 20.f, 100.f, 1.f);
         this->settingSlider("Note fade", "note-fade", 0.f, 3.f, 0.1f);
@@ -2830,6 +2915,41 @@ protected:
         localSlider("Motion time (s)", "count-motion-time", 0.05f, 1.f, 0.05f, 0.22f);
     }
 
+    void alignKeys(bool horizontal, bool distribute) {
+        auto const& geometry = m_viewer->geo();
+        if (geometry.size() < 2) return;
+        auto ordered = geometry;
+        std::stable_sort(ordered.begin(), ordered.end(), [horizontal](auto const& a, auto const& b) {
+            return horizontal ? a.x + a.w / 2.f < b.x + b.w / 2.f
+                              : a.y + a.h / 2.f > b.y + b.h / 2.f;
+        });
+        auto const* selected = geoById(m_sel);
+        auto const& reference = selected ? *selected : ordered.front();
+        float center = horizontal ? reference.y + reference.h / 2.f : reference.x + reference.w / 2.f;
+        float cursor = horizontal ? ordered.front().x : ordered.front().y + ordered.front().h;
+        float gap = readLook().gap;
+        for (auto const& item : ordered) {
+            auto key = keyById(item.id);
+            if (!key) continue;
+            if (horizontal) {
+                key->y = center - item.h / 2.f;
+                if (distribute) {
+                    key->x = cursor;
+                    cursor += item.w + gap;
+                }
+            } else {
+                key->x = center - item.w / 2.f;
+                if (distribute) {
+                    key->y = cursor - item.h;
+                    cursor -= item.h + gap;
+                }
+            }
+            saveKey(*key);
+        }
+        refreshAll();
+        setStatus("Aligned visible keys.");
+    }
+
     void buildViewTab() {
         rowChoice("Language", {"English", "Korean"},
             []() { return koreanUI() ? 1 : 0; },
@@ -2837,12 +2957,16 @@ protected:
                 Mod::get()->setSettingValue<std::string>("language", choice ? "Korean" : "English");
                 m_reloadLanguage = true;
             });
+        rowInfo("Align to the selected key.");
+        rowButton("Align horizontal", {58, 58, 72}, [this] { alignKeys(true, false); });
+        rowButton("Align vertical", {58, 58, 72}, [this] { alignKeys(false, false); });
+        rowButton("Space evenly in row", {58, 58, 72}, [this] { alignKeys(true, true); });
+        rowButton("Space evenly in column", {58, 58, 72}, [this] { alignKeys(false, true); });
         this->settingSlider("Box size", "box-size", 24.f, 80.f, 1.f);
         this->settingSlider("Jump width x", "jump-width", 0.5f, 3.f, 0.1f);
         this->settingSlider("Corner round %", "corner-radius", 0.f, 50.f, 1.f);
-        this->settingSlider("New key gap", "box-gap", 0.f, 24.f, 1.f);
+        this->settingSlider("Key spacing", "box-gap", 0.f, 24.f, 1.f);
         this->settingSlider("Idle opacity", "tile-opacity", 0.f, 255.f, 5.f, true);
-        rowInfo("Hex: tap a digit to change it.");
         this->settingColor("Idle box color", "tile-color");
         this->settingColor("Pressed box color", "pressed-color");
         this->settingToggle("Press glow", "show-glow");
