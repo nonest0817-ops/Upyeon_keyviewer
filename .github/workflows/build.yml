@@ -1,4 +1,4 @@
-name: Build Android
+name: Build Key Viewer
 
 on:
   workflow_dispatch:
@@ -7,16 +7,25 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-latest, target: Win64 }
+          - { runner: ubuntu-latest, target: Android64 }
+          - { runner: ubuntu-latest, target: Android32 }
+          - { runner: macos-latest, target: MacOS }
+          - { runner: macos-latest, target: iOS }
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: geode-sdk/build-geode-mod@main
         id: build
         with:
-          target: Android64
+          target: ${{ matrix.target }}
 
       - uses: actions/upload-artifact@v4
         with:
-          name: keyviewer-android64
+          name: keyviewer-${{ matrix.target }}
           path: ${{ steps.build.outputs.build-output }}

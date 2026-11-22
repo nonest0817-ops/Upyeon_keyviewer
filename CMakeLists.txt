@@ -8,7 +8,11 @@ else()
 endif()
 set(CMAKE_CXX_VISIBILITY_PRESET hidden)
 
-project(Template VERSION 1.0.0)
+project(KeyViewer VERSION 0.9.0)
+
+if(MSVC)
+    add_compile_options(/utf-8)
+endif()
 
 # Add all source files inside src (recursively)
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS src/*.cpp)

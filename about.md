@@ -1,20 +1,17 @@
 # Key Viewer
 
-A clean, customizable key viewer for Geometry Dash, inspired by DM Note.
+Geometry Dash 2.2081 · Geode 5.9.0 · v0.9.0
 
-## Features
+## 한국어
 
-- **Key boxes** with smooth press / release animation
-- **Note timeline**: presses flow upward like bars, held keys grow longer
-- **Press glow** around the box while pressed
-- **Counters**, **KPS**, max KPS and total presses
-- **Presets**: Minimal, Neon, Rhythm, Mono (or Custom)
-- **Platformer support**: left / jump / right
-- **2P row** (experimental) for 2-player / dual
-- **Drag to move**: open the pause menu and drag the key viewer to reposition it
-- Everything can be toggled in the mod settings
+일시정지 메뉴에서 **키 뷰어**를 열고 캔버스에서 키를 선택하세요. **키** 탭의 선택 목록에는 현재 레벨에서 숨겨진 방향키도 나옵니다. 키를 끌면 위치를 바꾸고, 손잡이를 끌면 크기를 바꿉니다. **배치**를 누르면 레벨 위에서 위치를 조절할 수 있습니다.
 
-## Tips
+- **키** 탭에서 입력, 이름, 배경색, 눌림 색, 테두리, 불투명도와 카운터를 선택한 키에 설정합니다.
+- **노트** 탭에서는 선택한 키의 속도, 너비, 최소 길이, 표시 높이, 그라데이션, 발광과 테두리를 조절합니다.
+- 색상표 아래의 여섯 자리를 눌러 원하는 HEX 색을 만드세요. 왼쪽 두 자리는 빨강, 가운데 두 자리는 초록, 오른쪽 두 자리는 파랑입니다. 각 자리는 0부터 F까지 순환합니다. 예를 들어 청록색은 #20C9B0입니다.
+- **키 초기화**를 누르면 선택한 키가 기본 스타일을 다시 따릅니다. 입력과 배치 좌표는 유지됩니다. **프리셋**에서 현재 배치와 키별 스타일을 함께 저장하고 불러옵니다.
+- **화면 → 언어**에서 한국어와 영어를 바꿉니다. 플레이 중 통계 언어는 다음 레벨 입장 시 적용됩니다. 긴 설정 목록은 오른쪽 가장자리를 끌어 스크롤하세요.
 
-- Lower the opacity so the viewer does not cover obstacles.
-- Mobile users: place it away from the bottom corners where your thumbs are.
+## English
+
+Open **Key Viewer** from the pause menu. Select a key on the canvas or from the Key tab. Individual key and note styles inherit their defaults until edited. Tap each of the six hexadecimal digits below a palette to choose any 24-bit RGB color. Use **Reset** to restore the selected key's style. **Sets** saves the layout and individual overrides together. Switch languages in **View → Language**.

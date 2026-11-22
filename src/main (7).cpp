@@ -8,11 +8,14 @@
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
+#include <map>
 #include <functional>
 #include <string>
 #include <vector>
 
 using namespace geode::prelude;
+
+#include "Localization.hpp"
 
 static constexpr float kBaseR = 7.f;    // 이미지 모서리 반지름 (게임 단위)
 static constexpr float kGlowPad = 16.f; // 글로우 이미지가 바깥으로 퍼지는 거리
@@ -159,7 +162,7 @@ static void dnStrokeA(CCDrawNode* n, float x0, float y0, float x1, float y1, flo
 
 static CCLabelBMFont* mkLabel(CCNode* parent, std::string const& s, float scale,
                               ccColor3B c, CCPoint pos, float ax) {
-    auto l = CCLabelBMFont::create(s.c_str(), "InterBold.fnt"_spr);
+    auto l = CCLabelBMFont::create(uiText(s).c_str(), koreanUI() ? "ViewerUI.fnt"_spr : "InterBold.fnt"_spr);
     if (!l) return nullptr;
     l->setScale(scale);
     l->setColor(c);
@@ -277,7 +280,32 @@ static Look readLook() {
 // 키 목록 (에디터에서 추가, 삭제, 수정하고 저장된다)
 // 입력 종류(map): 0 점프 P1, 1 왼쪽 P1, 2 오른쪽 P1, 3 점프 P2, 4 왼쪽 P2, 5 오른쪽 P2
 // ---------------------------------------------------------------
+using StyleValues = std::map<std::string, double>;
+
+static std::string encodeStyle(StyleValues const& values) {
+    std::string result;
+    for (auto const& [key, value] : values) {
+        result += key + "=" + numStr(value) + "|";
+    }
+    return result;
+}
+
+static StyleValues decodeStyle(std::string const& encoded) {
+    StyleValues values;
+    for (auto const& item : splitStr(encoded, '|')) {
+        auto eq = item.find('=');
+        if (eq == std::string::npos) continue;
+        auto number = item.substr(eq + 1);
+        char* end = nullptr;
+        double v = std::strtod(number.c_str(), &end);
+        if (end != number.c_str() && *end == 0 && std::isfinite(v))
+            values[item.substr(0, eq)] = v;
+    }
+    return values;
+}
+
 struct KeyDef {
+    StyleValues style;
     int id = 0;
     int map = 0;
     float x = 0.f, y = 0.f;      // 키뷰어 기준 왼쪽 아래 위치
@@ -321,6 +349,7 @@ static void saveKeyList() {
 
 static void saveKey(KeyDef const& k) {
     auto m = Mod::get();
+    m->setSavedValue<std::string>(kf(k.id, "style"), encodeStyle(k.style));
     m->setSavedValue<int64_t>(kf(k.id, "map"), k.map);
     m->setSavedValue<double>(kf(k.id, "x"), k.x);
     m->setSavedValue<double>(kf(k.id, "y"), k.y);
@@ -339,6 +368,7 @@ static KeyDef loadKey(int id) {
     auto m = Mod::get();
     KeyDef k;
     k.id = id;
+    k.style = decodeStyle(m->getSavedValue<std::string>(kf(id, "style"), ""));
     k.map = static_cast<int>(m->getSavedValue<int64_t>(kf(id, "map"), 0));
     k.x = static_cast<float>(m->getSavedValue<double>(kf(id, "x"), 0.0));
     k.y = static_cast<float>(m->getSavedValue<double>(kf(id, "y"), 0.0));
@@ -408,6 +438,31 @@ static Look lookForKey(Look const& base, KeyDef const& k) {
     if (k.border >= 0) kl.border = unpackC(k.border);
     kl.borderW = k.borderW;
     if (k.radius >= 0.f) kl.radius = k.radius / 100.f;
+    for (auto const& [key, v] : k.style) {
+        if (key == "note-width") kl.noteWidth = static_cast<float>(std::clamp(v, 20.0, 100.0)) / 100.f;
+        if (key == "note-min-length") kl.noteMin = static_cast<float>(std::clamp(v, 2.0, 60.0));
+        if (key == "note-speed") kl.noteSpeed = static_cast<float>(std::clamp(v, 100.0, 600.0));
+        if (key == "note-height") kl.noteHeight = static_cast<float>(std::clamp(v, 40.0, 220.0));
+        if (key == "note-opacity") kl.noteOpacity = static_cast<float>(std::clamp(v, 20.0, 100.0)) / 100.f;
+        if (key == "note-fade") kl.noteFade = static_cast<float>(std::clamp(v, 0.0, 3.0));
+        if (key == "note-radius") kl.noteRadius = static_cast<float>(std::clamp(v, 0.0, 50.0)) / 100.f;
+        if (key == "note-border") kl.noteBorder = static_cast<float>(std::clamp(v, 0.0, 4.0));
+        if (key == "note-glow-strength") kl.glowStrength = static_cast<float>(std::clamp(v, 0.0, 200.0)) / 100.f;
+        if (key == "note-glow-size") kl.glowSize = static_cast<float>(std::clamp(v, 50.0, 250.0)) / 100.f;
+        if (key == "tile-opacity") kl.tileOpacity = static_cast<GLubyte>(std::clamp(v, 0.0, 255.0));
+        if (key == "note-glow-custom") kl.glowCustom = v != 0;
+        if (key == "show-glow") kl.glow = v != 0;
+        if (key == "note-glow") kl.noteGlow = v != 0;
+        if (key == "show-counter") kl.counter = v != 0;
+        if (key == "show-timeline") kl.timeline = v != 0;
+        if (key == "gradient-color") kl.gradEnd = unpackC(static_cast<int>(std::clamp(v, 0.0, 16777215.0)));
+        if (key == "note-glow-color") kl.glowColor = unpackC(static_cast<int>(std::clamp(v, 0.0, 16777215.0)));
+        if (key == "note-border-color") kl.noteBorderColor = unpackC(static_cast<int>(std::clamp(v, 0.0, 16777215.0)));
+        if (key == "gradient-mode") {
+            kl.gradNotes = v == 1 || v == 3;
+            kl.gradTile = v == 2 || v == 3;
+        }
+    }
     return kl;
 }
 
@@ -473,7 +528,7 @@ static std::string serializePreset() {
         out += "K," + std::to_string(k.id) + "," + std::to_string(k.map) + "," + numStr(k.x) + "," +
                numStr(k.y) + "," + numStr(k.w) + "," + numStr(k.h) + "," + std::to_string(k.bg) + "," +
                std::to_string(k.pressed) + "," + std::to_string(k.border) + "," + std::to_string(k.accent) + "," +
-               numStr(k.borderW) + "," + numStr(k.radius) + "," + std::to_string(k.label) + ";";
+               numStr(k.borderW) + "," + numStr(k.radius) + "," + std::to_string(k.label) + "," + encodeStyle(k.style) + ";";
     }
     return out;
 }
@@ -512,6 +567,7 @@ static void applyPresetData(std::string const& data) {
             k.borderW = static_cast<float>(std::atof(f[11].c_str()));
             k.radius = static_cast<float>(std::atof(f[12].c_str()));
             k.label = std::clamp(std::atoi(f[13].c_str()), 0, kLabelCount - 1);
+            if (f.size() >= 15) k.style = decodeStyle(f[14]);
             keys.push_back(k);
         }
     }
@@ -569,6 +625,7 @@ struct NoteSprites {
 };
 
 struct Note {
+    int source = 0;
     double start = 0.0;
     double end = -1.0; // 아직 누르는 중이면 -1
     NoteSprites sp;
@@ -580,7 +637,7 @@ struct Note {
 // ---------------------------------------------------------------
 class KeyLane : public CCNode {
 protected:
-    bool m_down = false;
+    unsigned m_held = 0;
     bool m_dirty = true;
     int m_presses = 0;
     float m_w = 0.f, m_h = 0.f;
@@ -668,7 +725,7 @@ protected:
     void drawBorder() {
         m_border->clear();
         if (m_look.borderW <= 0.f) return;
-        float r = std::clamp(m_look.radius * m_h, 2.f, std::min(m_w, m_h) / 2.f);
+        float r = std::min(std::max(m_look.radius * m_h, 2.f), std::min(m_w, m_h) / 2.f);
         dnStroke(m_border, 0.5f, 0.5f, m_w - 0.5f, m_h - 0.5f, r, m_look.border, m_look.borderW, 5);
     }
 
@@ -728,7 +785,7 @@ public:
         m_h = h;
         this->setContentSize({m_w, m_h});
 
-        float r = std::clamp(l.radius * m_h, 2.f, m_h / 2.f);
+        float r = std::min(std::max(l.radius * m_h, 2.f), m_h / 2.f);
         float s = std::clamp(r / kBaseR, 0.2f, std::max(0.2f, std::min(m_w, m_h) / kCap));
         if (m_lw != m_w || m_lh != m_h || m_ls != s) {
             m_lw = m_w; m_lh = m_h; m_ls = s;
@@ -758,22 +815,34 @@ public:
     }
 
     // 상태가 실제로 바뀌었을 때만 true (같은 입력이 두 번 들어와도 한 번만 센다)
-    bool setDown(bool down, double t) {
-        if (down == m_down) return false;
-        m_down = down;
+    void input(int source, bool down, double t, bool drawNotes) {
+        const unsigned bit = 1u << source;
         if (down) {
-            m_presses++;
+            m_held |= bit;
+            ++m_presses;
             m_count->setString(std::to_string(m_presses).c_str());
             this->fitCount();
-            Note n;
-            n.start = t;
-            n.end = -1.0;
-            n.sp = this->acquire();
-            m_notes.push_back(n);
-        } else if (!m_notes.empty() && m_notes.back().end < 0) {
-            m_notes.back().end = t;
+            if (drawNotes && m_look.timeline) {
+                Note n;
+                n.source = source;
+                n.start = t;
+                n.sp = acquire();
+                m_notes.push_back(n);
+            }
+        } else if (m_held & bit) {
+            m_held &= ~bit;
+            for (auto it = m_notes.rbegin(); it != m_notes.rend(); ++it) {
+                if (it->source == source && it->end < 0) {
+                    it->end = t;
+                    break;
+                }
+            }
         }
-        return true;
+    }
+
+    void resetInput() {
+        m_held = 0;
+        clearNotes();
     }
 
     void resetCount() {
@@ -792,7 +861,7 @@ public:
     void tickNotes(double now) {
         m_noteBorder->clear();
         if (!m_look.timeline) {
-            this->clearNotes();
+            if (!m_notes.empty()) this->clearNotes();
             return;
         }
 
@@ -800,10 +869,13 @@ public:
         float sp = m_look.noteSpeed;
         float minLen = std::max(kCap, m_look.noteMin);
 
-        while (!m_notes.empty() && m_notes.front().end >= 0 &&
-               (now - m_notes.front().end) * sp >= H) {
-            this->release(m_notes.front().sp);
-            m_notes.pop_front();
+        for (auto it = m_notes.begin(); it != m_notes.end();) {
+            if (it->end >= 0 && (now - it->end) * sp >= H) {
+                this->release(it->sp);
+                it = m_notes.erase(it);
+            } else {
+                ++it;
+            }
         }
 
         float baseY = m_h + 5.f;
@@ -875,8 +947,8 @@ public:
     }
 
     void tick(double now, float dt) {
-        float target = m_down ? 1.f : 0.f;
-        float rate = m_down ? 40.f : 14.f;
+        float target = m_held ? 1.f : 0.f;
+        float rate = m_held ? 40.f : 14.f;
         float old = m_press;
         m_press += (target - m_press) * std::min(1.f, dt * rate);
         if (std::abs(m_press - target) < 0.01f) m_press = target;
@@ -913,6 +985,8 @@ protected:
     CCDrawNode* m_frame = nullptr;
     std::string m_infoStr;
     std::deque<double> m_hits;
+    unsigned m_heldSources = 0;
+    bool m_koreanStats = false;
     int m_total = 0;
     int m_peak = 0;
     float m_refresh = 0.f;
@@ -932,12 +1006,13 @@ protected:
         m_frame = CCDrawNode::create();
         this->addChild(m_frame, 5);
 
-        m_info = CCLabelBMFont::create("", "InterBold.fnt"_spr);
+        m_koreanStats = koreanUI();
+        m_info = CCLabelBMFont::create("", koreanUI() ? "ViewerUI.fnt"_spr : "InterBold.fnt"_spr);
         m_info->setScale(0.38f);
         m_info->setOpacity(190);
         this->addChild(m_info);
 
-        m_hint = CCLabelBMFont::create("DRAG TO MOVE", "InterBold.fnt"_spr);
+        m_hint = CCLabelBMFont::create(uiText("DRAG TO MOVE").c_str(), koreanUI() ? "ViewerUI.fnt"_spr : "InterBold.fnt"_spr);
         m_hint->setScale(0.38f);
         m_hint->setVisible(false);
         this->addChild(m_hint, 6);
@@ -1057,7 +1132,11 @@ public:
 
     void applyLook() {
         loadKeys();
+        const bool wasVisible = m_look.viewerVisible;
         m_look = readLook();
+        if (wasVisible && !m_look.viewerVisible) {
+            for (auto& r : m_lanes) r.lane->clearNotes();
+        }
         this->setVisible(m_look.viewerVisible);
         this->syncLanes();
 
@@ -1110,25 +1189,32 @@ public:
     // 게임이 보내는 입력: 해당 입력에 연결된 키를 누른 상태로 바꾼다.
     // 2P 전용 키가 없으면 2P 입력도 1P 키가 받는다 (듀얼, 2인 모드에서 인식되지 않던 문제)
     void onButton(int button, bool down, bool isPlayer1) {
-        int idx = (isPlayer1 ? 0 : 3) + std::clamp(button - 1, 0, 2);
-        auto targets = this->lanesForMap(idx);
-        if (targets.empty()) targets = this->lanesForMap((idx + 3) % 6);
-
-        double t = nowSec();
-        bool changed = false;
+        if (button < 1 || button > 3) return;
+        const int source = (isPlayer1 ? 0 : 3) + button - 1;
+        const unsigned bit = 1u << source;
+        if (down == bool(m_heldSources & bit)) return;
+        const double t = nowSec();
+        if (!down) {
+            m_heldSources &= ~bit;
+            // A key may have been remapped while this press was held.
+            for (auto& r : m_lanes) r.lane->input(source, false, t, false);
+            return;
+        }
+        m_heldSources |= bit;
+        auto targets = lanesForMap(source);
+        if (targets.empty()) targets = lanesForMap((source + 3) % 6);
+        if (targets.empty()) return;
         for (auto lane : targets) {
-            if (lane->setDown(down, t)) changed = true;
+            lane->input(source, true, t, m_look.viewerVisible && lane->isVisible());
         }
-        if (changed && down) {
-            m_hits.push_back(t);
-            m_total++;
-        }
+        m_hits.push_back(t);
+        ++m_total;
     }
 
     void onRestart() {
+        m_heldSources = 0;
         for (auto& r : m_lanes) {
-            r.lane->setDown(false, nowSec());
-            r.lane->clearNotes();
+            r.lane->resetInput();
             if (m_look.resetOnRestart) r.lane->resetCount();
         }
         if (m_look.resetOnRestart) {
@@ -1164,13 +1250,14 @@ public:
         int kps = static_cast<int>(m_hits.size());
         m_peak = std::max(m_peak, kps);
 
-        for (auto& r : m_lanes) r.lane->tick(now, dt);
+        if (!m_look.viewerVisible) return;
+        for (auto& r : m_lanes) if (r.lane->isVisible()) r.lane->tick(now, dt);
 
         std::string s;
-        if (m_look.kps) s += "KPS " + std::to_string(kps) + "  MAX " + std::to_string(m_peak);
+        if (m_look.kps) s += "KPS " + std::to_string(kps) + (m_koreanStats ? "  최고 " : "  MAX ") + std::to_string(m_peak);
         if (m_look.total) {
             if (!s.empty()) s += "   ";
-            s += "TOTAL " + std::to_string(m_total);
+            s += (m_koreanStats ? "합계 " : "TOTAL ") + std::to_string(m_total);
         }
         if (s != m_infoStr) {
             m_infoStr = s;
@@ -1233,6 +1320,7 @@ protected:
     int m_sel = -1; // 선택한 키 id
     bool m_previewPressed = false;
     bool m_closing = false;
+    bool m_reloadLanguage = false;
     bool m_mapMode = false;
     bool m_pendingRebuild = false;
 
@@ -1440,7 +1528,7 @@ protected:
     static std::string describeKey(int id) {
         auto k = keyById(id);
         if (!k) return "-";
-        return "#" + std::to_string(id) + "  " + kMapNames[std::clamp(k->map, 0, 5)];
+        return "#" + std::to_string(id) + "  " + uiText(kMapNames[std::clamp(k->map, 0, 5)]);
     }
 
     View view() const {
@@ -1495,14 +1583,11 @@ protected:
     }
 
     void setStatus(std::string const& s) {
-        if (m_status) m_status->setString(s.c_str());
+        if (m_status) m_status->setString(uiText(s).c_str());
     }
 
     void ensureSelection() {
-        auto const& geo = m_viewer->geo();
-        if (geo.empty()) return;
-        for (auto const& g : geo) if (g.id == m_sel) return;
-        m_sel = geo.front().id;
+        if (!keyById(m_sel)) loadAndSelect();
     }
 
     // 키별 설정을 바꾼 뒤: 저장하고 게임 화면과 캔버스에 반영
@@ -1575,7 +1660,7 @@ protected:
         m_viewer->applyLook();
         this->redrawCanvas();
         m_pendingRebuild = true;
-        this->setStatus("Added key " + describeKey(k.id));
+        this->setStatus(uiText("Added key ") + describeKey(k.id));
     }
 
     void deleteKey() {
@@ -1703,7 +1788,7 @@ protected:
             float x0 = v.ox + g.x * v.sc, y0 = v.oy + g.y * v.sc;
             float w = g.w * v.sc, h = g.h * v.sc;
             float x1 = x0 + w, y1 = y0 + h;
-            float r = std::clamp(kl.radius * h, 2.f, std::min(w, h) / 2.f);
+            float r = std::min(std::max(kl.radius * h, 2.f), std::min(w, h) / 2.f);
 
             // 노트 모양 미리보기 (창 모드에서만)
             if (!m_mapMode && kl.timeline) {
@@ -1919,7 +2004,7 @@ protected:
             dnRect(d, tx0, ty - 1.2f, tx1, ty + 1.2f, ccColor3B{70, 70, 86}, 1.f);
             dnRect(d, tx0, ty - 1.2f, kx, ty + 1.2f, kBlue, 1.f);
             dnRound(d, kx - 4.f, ty - 4.f, kx + 4.f, ty + 4.f, 4.f, kWhite, 1.f, 3);
-            if (val) val->setString((fmt ? fmt(v) : fmtNum(v)).c_str());
+            if (val) val->setString(uiText(fmt ? fmt(v) : fmtNum(v)).c_str());
         };
         refresh();
 
@@ -1959,7 +2044,7 @@ protected:
             dnRound(d, w - 18.f, top - 20.f, w, top - 4.f, 4.f, ccColor3B{58, 58, 72}, 1.f, 3);
             int cur = std::clamp(get(), 0, n - 1);
             if (val) {
-                val->setString(opts[cur].c_str());
+                val->setString(uiText(opts[cur]).c_str());
                 float lw = val->getContentSize().width * 0.30f;
                 float maxW = 76.f;
                 val->setScale(lw > maxW && lw > 0.f ? 0.30f * maxW / lw : 0.30f);
@@ -1986,7 +2071,7 @@ protected:
         int ri = beginRow(36.f);
         float top = m_rows[ri].top;
         float w = m_inW;
-        rowLabel(ri, label, 0.f, top - 8.f, 0.30f, ccColor3B{235, 235, 240}, 0.f);
+        rowLabel(ri, label, 0.f, top - 8.f, 0.25f, ccColor3B{235, 235, 240}, 0.f);
         auto d = rowDraw(ri);
         int n = allowAuto ? 13 : 12;
         float cell = w / n;
@@ -1994,9 +2079,14 @@ protected:
         float y0 = top - 31.f;
         if (allowAuto) rowLabel(ri, "A", cell / 2.f, y0 + sw / 2.f, 0.26f, ccColor3B{200, 200, 210}, 0.5f);
 
+        auto hex = rowLabel(ri, "", w, top - 8.f, 0.28f, kWhite, 1.f);
         auto refresh = [=]() {
             d->clear();
             int cur = get();
+            char value[12];
+            if (cur < 0) std::snprintf(value, sizeof value, "AUTO");
+            else std::snprintf(value, sizeof value, "#%06X", unsigned(cur) & 0xffffffu);
+            if (hex) hex->setString(uiText(value).c_str());
             for (int i = 0; i < n; i++) {
                 float x0 = i * cell + 1.f;
                 bool isAuto = allowAuto && i == 0;
@@ -2012,13 +2102,41 @@ protected:
         c.scroll = true;
         c.row = ri;
         c.r = CCRect(0.f, top - 36.f, w, 30.f);
-        c.down = [=](CCPoint p) {
+        c.down = [=, this](CCPoint p) {
             int i = std::clamp(static_cast<int>(p.x / cell), 0, n - 1);
             if (allowAuto && i == 0) set(-1);
             else set(packC(kPalette[i - (allowAuto ? 1 : 0)]));
             refresh();
+            m_pendingRebuild = true;
         };
         m_scrollCtls.push_back(c);
+        int digits = beginRow(24.f);
+        auto digitBar = rowDraw(digits);
+        float topY = m_rows[digits].top;
+        float buttonW = w / 7.f;
+        for (int digit = 0; digit < 6; ++digit) {
+            float x = (digit + 1) * buttonW;
+            dnRound(digitBar, x, topY - 21.f, x + buttonW - 2.f, topY - 2.f, 3.f,
+                    {58, 58, 72}, 1.f, 3);
+            int shift = (5 - digit) * 4;
+            auto number = rowLabel(digits, "", x + buttonW / 2.f, topY - 12.f, 0.28f, kWhite, 0.5f);
+            int color = std::max(get(), 0);
+            if (number) number->setString(std::string(1, "0123456789ABCDEF"[(color >> shift) & 15]).c_str());
+            Ctl field;
+            field.row = digits;
+            field.scroll = true;
+            field.r = CCRect(x, topY - 23.f, buttonW, 23.f);
+            field.down = [=, this](CCPoint) {
+                int current = std::max(get(), 0);
+                int next = (((current >> shift) + 1) & 15) << shift;
+                set((current & ~(15 << shift)) | next);
+                m_pendingRebuild = true;
+            };
+            m_scrollCtls.push_back(field);
+        }
+        dnRound(digitBar, 1.f, topY - 20.f, buttonW - 3.f, topY - 3.f, 3.f,
+                unpackC(std::max(get(), 0)), 1.f, 3);
+
     }
 
     void rowToggle(std::string const& label, std::function<bool()> get, std::function<void(bool)> set) {
@@ -2107,17 +2225,17 @@ protected:
             this->ensureSelection();
             this->redrawCanvas();
             m_pendingRebuild = true;
-            this->setStatus("Loaded " + presetName(i));
+            this->setStatus(uiText("Loaded ") + presetName(i));
         };
         actions[1] = [this, i]() {
             presetSetData(i, serializePreset());
-            this->setStatus("Saved over " + presetName(i));
+            this->setStatus(uiText("Saved over ") + presetName(i));
         };
         actions[2] = [this, i]() {
             std::string n = presetName(i);
             presetDelete(i);
             m_pendingRebuild = true;
-            this->setStatus("Deleted " + n);
+            this->setStatus(uiText("Deleted ") + n);
         };
 
         for (int k = 0; k < 3; k++) {
@@ -2141,14 +2259,35 @@ protected:
     }
 
     // 전체 설정(모드 설정)과 연결된 슬라이더, 스위치, 색
+    int styleKey() const { return m_tab <= 1 ? m_sel : -1; }
+
+    static double styleValue(int id, std::string const& key, double fallback) {
+        if (auto k = keyById(id)) {
+            auto it = k->style.find(key);
+            if (it != k->style.end()) return it->second;
+        }
+        return fallback;
+    }
+
+    bool writeStyle(int id, std::string const& key, double value) {
+        auto k = keyById(id);
+        if (!k) return false;
+        if (value < 0) k->style.erase(key);
+        else k->style[key] = value;
+        commitKey(id);
+        return true;
+    }
+
     void settingSlider(std::string const& label, char const* key, float vmin, float vmax, float step, bool isInt = false) {
         std::string k = key;
+        int id = styleKey();
         rowSlider(label, vmin, vmax, step,
-            [k, isInt]() {
-                if (isInt) return static_cast<float>(Mod::get()->getSettingValue<int64_t>(k));
-                return static_cast<float>(Mod::get()->getSettingValue<double>(k));
+            [k, isInt, id]() {
+                double base = isInt ? double(Mod::get()->getSettingValue<int64_t>(k)) : Mod::get()->getSettingValue<double>(k);
+                return static_cast<float>(styleValue(id, k, base));
             },
-            [this, k, isInt](float v) {
+            [this, k, isInt, id](float v) {
+                if (writeStyle(id, k, v)) return;
                 if (isInt) Mod::get()->setSettingValue<int64_t>(k, static_cast<int64_t>(v));
                 else Mod::get()->setSettingValue<double>(k, static_cast<double>(v));
                 this->refreshAll();
@@ -2157,9 +2296,11 @@ protected:
 
     void settingToggle(std::string const& label, char const* key) {
         std::string k = key;
+        int id = styleKey();
         rowToggle(label,
-            [k]() { return Mod::get()->getSettingValue<bool>(k); },
-            [this, k](bool v) {
+            [id, k]() { return styleValue(id, k, Mod::get()->getSettingValue<bool>(k)) != 0; },
+            [this, id, k](bool v) {
+                if (writeStyle(id, k, v)) return;
                 Mod::get()->setSettingValue<bool>(k, v);
                 this->refreshAll();
             });
@@ -2167,21 +2308,36 @@ protected:
 
     void settingColor(std::string const& label, char const* key) {
         std::string k = key;
+        int id = styleKey();
         rowColor(label,
-            [k]() { return packC(Mod::get()->getSettingValue<ccColor3B>(k)); },
-            [this, k](int v) {
+            [id, k]() { return static_cast<int>(styleValue(id, k, packC(Mod::get()->getSettingValue<ccColor3B>(k)))); },
+            [this, id, k](int v) {
+                if (writeStyle(id, k, v)) return;
                 if (v >= 0) Mod::get()->setSettingValue<ccColor3B>(k, unpackC(v));
                 this->refreshAll();
             },
-            false);
+            id >= 0);
     }
 
     void buildKeyTab() {
         int id = m_sel;
         {
             int ri = beginRow(18.f);
-            rowLabel(ri, "KEY  " + describeKey(id), 0.f, m_rows[ri].top - 9.f, 0.32f, kWhite, 0.f);
+            rowLabel(ri, uiText("KEY  ") + describeKey(id), 0.f, m_rows[ri].top - 9.f, 0.32f, kWhite, 0.f);
         }
+        std::vector<int> ids;
+        std::vector<std::string> names;
+        for (auto const& key : g_keys) {
+            ids.push_back(key.id);
+            names.push_back(describeKey(key.id));
+        }
+        rowCycle("Select key", names,
+            [id, ids]() { return int(std::find(ids.begin(), ids.end(), id) - ids.begin()); },
+            [this, ids](int index) {
+                m_sel = ids[index];
+                redrawCanvas();
+                m_pendingRebuild = true;
+            });
         std::vector<std::string> maps(kMapNames, kMapNames + 6);
         rowCycle("Input", maps,
             [id]() { auto k = keyById(id); return k ? k->map : 0; },
@@ -2216,6 +2372,10 @@ protected:
         rowSlider("Border width", 0.f, 6.f, 0.5f,
             [id]() { auto k = keyById(id); return k ? k->borderW : 0.f; },
             [this, id](float v) { if (auto k = keyById(id)) k->borderW = v; this->commitKey(id); });
+        settingSlider("Idle opacity", "tile-opacity", 0.f, 255.f, 1.f, true);
+        settingToggle("Press glow", "show-glow");
+        settingToggle("Key counters", "show-counter");
+        rowInfo("Hex: tap a digit to change it.");
         rowColor("Background color",
             [id]() { auto k = keyById(id); return k ? k->bg : -1; },
             [this, id](int v) { if (auto k = keyById(id)) k->bg = v; this->commitKey(id); }, true);
@@ -2231,8 +2391,9 @@ protected:
         int id = m_sel;
         {
             int ri = beginRow(18.f);
-            rowLabel(ri, "NOTES  " + describeKey(id), 0.f, m_rows[ri].top - 9.f, 0.32f, kWhite, 0.f);
+            rowLabel(ri, uiText("NOTES  ") + describeKey(id), 0.f, m_rows[ri].top - 9.f, 0.32f, kWhite, 0.f);
         }
+        rowInfo("Hex: tap a digit to change it.");
         rowColor("Note color (this key)",
             [id]() { auto k = keyById(id); return k ? k->accent : -1; },
             [this, id](int v) { if (auto k = keyById(id)) k->accent = v; this->commitKey(id); }, true);
@@ -2243,14 +2404,13 @@ protected:
         this->settingSlider("Speed", "note-speed", 100.f, 600.f, 5.f);
         this->settingSlider("Timeline length", "note-height", 40.f, 220.f, 5.f);
         rowChoice("Gradient colors", {"Off", "Notes", "Tile", "Both"},
-            []() {
+            [id]() {
                 auto g = Mod::get()->getSettingValue<std::string>("gradient-mode");
-                for (int i = 0; i < 4; i++) if (g == kGradNames[i]) return i;
+                for (int i = 0; i < 4; i++) if (g == kGradNames[i]) return static_cast<int>(std::clamp(styleValue(id, "gradient-mode", i), 0.0, 3.0));
                 return 0;
             },
-            [this](int i) {
-                Mod::get()->setSettingValue<std::string>("gradient-mode", kGradNames[std::clamp(i, 0, 3)]);
-                this->refreshAll();
+            [this, id](int i) {
+                writeStyle(id, "gradient-mode", i);
             });
         this->settingColor("Gradient end color", "gradient-color");
         this->settingSlider("Note opacity %", "note-opacity", 20.f, 100.f, 1.f);
@@ -2272,11 +2432,18 @@ protected:
     }
 
     void buildViewTab() {
+        rowChoice("Language", {"English", "Korean"},
+            []() { return koreanUI() ? 1 : 0; },
+            [this](int choice) {
+                Mod::get()->setSettingValue<std::string>("language", choice ? "Korean" : "English");
+                m_reloadLanguage = true;
+            });
         this->settingSlider("Box size", "box-size", 24.f, 80.f, 1.f);
         this->settingSlider("Jump width x", "jump-width", 0.5f, 3.f, 0.1f);
         this->settingSlider("Corner round %", "corner-radius", 0.f, 50.f, 1.f);
-        this->settingSlider("Box gap", "box-gap", 0.f, 24.f, 1.f);
+        this->settingSlider("New key gap", "box-gap", 0.f, 24.f, 1.f);
         this->settingSlider("Idle opacity", "tile-opacity", 0.f, 255.f, 5.f, true);
+        rowInfo("Hex: tap a digit to change it.");
         this->settingColor("Idle box color", "tile-color");
         this->settingColor("Pressed box color", "pressed-color");
         this->settingToggle("Press glow", "show-glow");
@@ -2383,7 +2550,7 @@ public:
             return true;
         }
         if (!m_mapMode && this->inViewport(p)) {
-            int i = this->hitScroll(p);
+            int i = p.x >= inX1 - 10.f ? -1 : this->hitScroll(p);
             if (i >= 0) {
                 m_activeScroll = i;
                 auto fn = m_scrollCtls[i].down;
@@ -2431,6 +2598,17 @@ public:
     void ccTouchCancelled(CCTouch* touch, CCEvent*) override { this->finishTouch(touch); }
 
     void update(float) override {
+        if (m_reloadLanguage) {
+            m_reloadLanguage = false;
+            if (auto next = KVEditor::create(m_viewer)) {
+                next->m_sel = m_sel;
+                next->m_tab = m_tab;
+                next->setMapMode(false);
+                getParent()->addChild(next, 100000);
+                removeFromParentAndCleanup(true);
+                return;
+            }
+        }
         if (m_pendingRebuild) {
             m_pendingRebuild = false;
             this->rebuildInspector();
@@ -2484,6 +2662,11 @@ class $modify(KVPauseLayer, PauseLayer) {
 
         auto win = CCDirector::get()->getWinSize();
         auto spr = ButtonSprite::create("Key Viewer");
+        if (koreanUI()) {
+            if (auto label = spr->getChildByType<CCLabelBMFont>(0)) label->setVisible(false);
+            auto size = spr->getContentSize();
+            mkLabel(spr, "KEY VIEWER", 0.52f, kWhite, {size.width / 2, size.height / 2}, 0.5f);
+        }
         spr->setScale(0.6f);
         auto btn = CCMenuItemSpriteExtra::create(spr, this, menu_selector(KVPauseLayer::onKeyViewer));
         auto menu = CCMenu::create();
