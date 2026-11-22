@@ -2980,7 +2980,7 @@ protected:
 
     void changeZoom(float factor, bool reset = false) {
         m_zoom = reset ? 1.f : std::clamp(m_zoom * factor, 0.35f, 4.f);
-        if (reset) m_pan = {0.f, 0.f};
+        if (reset) m_pan = CCPoint{0.f, 0.f};
         redrawCanvas();
     }
 
