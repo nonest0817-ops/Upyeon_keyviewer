@@ -8,7 +8,7 @@
   },
   "id": "nonest.keyviewer",
   "name": "Key Viewer",
-  "version": "v0.9.3",
+  "version": "v0.9.4",
   "developer": "nonest",
   "description": "Dark, glowing key viewer with rising notes, gradient colors, add-able keys, user presets and an in-game editor opened from the pause menu.",
   "settings": {

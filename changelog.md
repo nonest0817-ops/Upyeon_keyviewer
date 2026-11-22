@@ -1,3 +1,9 @@
+# v0.9.4
+
+- Open metric settings with direct buttons or by clicking a preview tile.
+- Capture keyboard bindings before the pause menu receives the key.
+- Save and apply presets per selected key, including photo presets and legacy styles.
+
 # v0.9.3
 
 - Scale note length to input hold duration.

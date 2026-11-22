@@ -93,6 +93,7 @@ static std::string uiText(std::string const& text) {
         {"Save style as preset", "스타일을 프리셋으로 저장"},
         {"Preset name", "프리셋 이름"},
         {"Presets store appearance only.", "프리셋에는 스타일만 저장합니다."},
+        {"Apply to selected key ", "적용할 키 "},
         {"Language", "언어"},
         {"Korean", "한국어"},
         {"Select key", "키 선택"},

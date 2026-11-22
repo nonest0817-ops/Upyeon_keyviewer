@@ -666,11 +666,6 @@ static StyleValues visualKeyStyle(KeyDef const& key) {
     return style;
 }
 
-static StyleValues visualStatStyle(StyleValues style) {
-    for (auto field : {"language", "visible", "anchor", "x", "y", "width", "height"}) style.erase(field);
-    return style;
-}
-
 static std::string keyStyleRecord(KeyDef const& key, char type) {
     std::string out(1, type);
     return out + "," + std::to_string(key.id) + "," + std::to_string(key.bg) + "," +
@@ -679,25 +674,48 @@ static std::string keyStyleRecord(KeyDef const& key, char type) {
         encodeStyle(visualKeyStyle(key)) + ";";
 }
 
-static std::string serializePreset() {
+static StyleValues readPresetDefaults() {
+    StyleValues defaults;
     auto mod = Mod::get();
-    std::string out;
     for (auto const& d : kSetDefs) {
-        std::string key = d.key;
-        std::string value;
         switch (d.type) {
-            case SetType::Bool: value = mod->getSettingValue<bool>(key) ? "1" : "0"; break;
-            case SetType::Num: value = numStr(mod->getSettingValue<double>(key)); break;
-            case SetType::Int: value = std::to_string(mod->getSettingValue<int64_t>(key)); break;
-            case SetType::Color: value = std::to_string(packC(mod->getSettingValue<ccColor3B>(key))); break;
-            case SetType::Str: value = cleanStr(mod->getSettingValue<std::string>(key)); break;
+            case SetType::Bool: defaults[d.key] = mod->getSettingValue<bool>(d.key); break;
+            case SetType::Num: defaults[d.key] = mod->getSettingValue<double>(d.key); break;
+            case SetType::Int: defaults[d.key] = mod->getSettingValue<int64_t>(d.key); break;
+            case SetType::Color: defaults[d.key] = packC(mod->getSettingValue<ccColor3B>(d.key)); break;
+            case SetType::Str: {
+                auto mode = mod->getSettingValue<std::string>(d.key);
+                defaults[d.key] = mode == "Both" ? 3 : mode == "Tile" ? 2 : mode == "Notes" ? 1 : 0;
+                break;
+            }
         }
-        out += "S," + key + "," + value + ";";
     }
-    for (auto const& key : g_keys) out += keyStyleRecord(key, 'Y');
-    for (int i = 0; i < StatCount; ++i)
-        out += "T," + std::to_string(i) + "," + encodeStyle(visualStatStyle(g_statSettings[i])) + ";";
-    return out;
+    return defaults;
+}
+
+static void includeInheritedStyle(KeyDef& snapshot, StyleValues const& defaults) {
+    auto color = [&](int& field, char const* name) {
+        const auto value = defaults.find(name);
+        if (field < 0 && value != defaults.end()) field = static_cast<int>(std::clamp(value->second, 0., 16777215.));
+    };
+    color(snapshot.bg, "tile-color");
+    color(snapshot.pressed, "pressed-color");
+    color(snapshot.accent, snapshot.map % 3 == 1 ? "accent-left" : snapshot.map % 3 == 2 ? "accent-right" : "accent-jump");
+    if (auto radius = defaults.find("corner-radius"); snapshot.radius < 0.f && radius != defaults.end())
+        snapshot.radius = static_cast<float>(std::clamp(radius->second, 0., 50.));
+    for (auto const& [key, value] : defaults) {
+        if (key == "tile-color" || key == "pressed-color" || key == "corner-radius" ||
+            key == "accent-left" || key == "accent-right" || key == "accent-jump") continue;
+        snapshot.style.try_emplace(key, value);
+    }
+}
+
+static std::string serializePreset(int target) {
+    auto key = keyById(target);
+    if (!key) return {};
+    KeyDef snapshot = *key;
+    includeInheritedStyle(snapshot, readPresetDefaults());
+    return keyStyleRecord(snapshot, 'A');
 }
 
 static void applyKeyStyle(KeyDef& current, KeyDef const& style) {
@@ -713,81 +731,49 @@ static void applyKeyStyle(KeyDef& current, KeyDef const& style) {
     saveKey(current);
 }
 
-static bool applyPresetData(std::string const& data) {
-    auto mod = Mod::get();
-    std::vector<KeyDef> keyStyles;
-    std::array<StyleValues, StatCount> stats{};
-    std::array<bool, StatCount> hasStats{};
-    std::vector<std::pair<SetDef, std::string>> settings;
-    bool forAll = false;
+static bool applyPresetData(std::string const& data, int target) {
+    auto current = keyById(target);
+    if (!current) return false;
+    std::vector<KeyDef> styles;
+    StyleValues defaults;
     for (auto const& record : splitStr(data, ';')) {
-        auto f = splitStr(record, ',');
-        if (f[0] == "S" && f.size() == 3) {
-            for (auto const& d : kSetDefs) {
-                if (f[1] == d.key) settings.emplace_back(d, f[2]);
-            }
-        } else if (f[0] == "T" && f.size() == 3) {
-            if (f[1] != "0" && f[1] != "1" && f[1] != "2") continue;
-            int index = f[1][0] - '0';
-            stats[index] = visualStatStyle(decodeStyle(f[2]));
-            hasStats[index] = true;
-        } else if (f[0] == "K" || f[0] == "Y" || f[0] == "A") {
-            bool legacy = f[0] == "K";
-            if (f.size() < (legacy ? 14u : 9u)) return false;
-            KeyDef key;
-            key.id = std::atoi(f[1].c_str());
+        auto fields = splitStr(record, ',');
+        if (fields[0] == "S" && fields.size() == 3) {
+            auto setting = std::find_if(std::begin(kSetDefs), std::end(kSetDefs),
+                [&](SetDef const& d) { return fields[1] == d.key; });
+            if (setting == std::end(kSetDefs)) continue;
+            auto const& value = fields[2];
+            double parsed = setting->type == SetType::Str
+                ? (value == "Both" ? 3 : value == "Tile" ? 2 : value == "Notes" ? 1 : 0)
+                : std::atof(value.c_str());
+            if (std::isfinite(parsed)) defaults[setting->key] = parsed;
+        } else if (fields[0] == "K" || fields[0] == "Y" || fields[0] == "A") {
+            bool legacy = fields[0] == "K";
+            if (fields.size() < (legacy ? 14u : 9u)) return false;
+            KeyDef style;
+            style.id = std::atoi(fields[1].c_str());
+            style.map = legacy ? std::clamp(std::atoi(fields[2].c_str()), 0, 5) : current->map;
             size_t first = legacy ? 7 : 2;
-            key.bg = std::atoi(f[first].c_str());
-            key.pressed = std::atoi(f[first + 1].c_str());
-            key.border = std::atoi(f[first + 2].c_str());
-            key.accent = std::atoi(f[first + 3].c_str());
-            key.borderW = static_cast<float>(std::atof(f[first + 4].c_str()));
-            key.radius = static_cast<float>(std::atof(f[first + 5].c_str()));
+            style.bg = std::atoi(fields[first].c_str());
+            style.pressed = std::atoi(fields[first + 1].c_str());
+            style.border = std::atoi(fields[first + 2].c_str());
+            style.accent = std::atoi(fields[first + 3].c_str());
+            style.borderW = static_cast<float>(std::atof(fields[first + 4].c_str()));
+            style.radius = static_cast<float>(std::atof(fields[first + 5].c_str()));
             size_t styleIndex = legacy ? 14 : 8;
-            if (f.size() > styleIndex) key.style = decodeStyle(f[styleIndex]);
-            if (!std::isfinite(key.borderW) || !std::isfinite(key.radius)) return false;
-            key.borderW = std::clamp(key.borderW, 0.f, 6.f);
-            key.radius = std::clamp(key.radius, -1.f, 50.f);
-            keyStyles.push_back(std::move(key));
-            forAll = forAll || f[0] == "A";
+            if (fields.size() > styleIndex) style.style = decodeStyle(fields[styleIndex]);
+            if (!std::isfinite(style.borderW) || !std::isfinite(style.radius)) return false;
+            style.borderW = std::clamp(style.borderW, 0.f, 6.f);
+            style.radius = std::clamp(style.radius, -1.f, 50.f);
+            styles.push_back(std::move(style));
         }
     }
-    if (keyStyles.empty()) return false;
-    for (auto const& [d, value] : settings) {
-        std::string key = d.key;
-        switch (d.type) {
-            case SetType::Bool: mod->setSettingValue<bool>(key, value == "1"); break;
-            case SetType::Num: {
-                double number = std::atof(value.c_str());
-                if (std::isfinite(number)) mod->setSettingValue<double>(key, number);
-                break;
-            }
-            case SetType::Int: mod->setSettingValue<int64_t>(key, std::atoll(value.c_str())); break;
-            case SetType::Color: mod->setSettingValue<ccColor3B>(key, unpackC(std::atoi(value.c_str()))); break;
-            case SetType::Str: mod->setSettingValue<std::string>(key, value); break;
-        }
-    }
-    for (size_t i = 0; i < g_keys.size(); ++i) {
-        auto& current = g_keys[i];
-        if (forAll) {
-            applyKeyStyle(current, keyStyles.front());
-        } else {
-            auto match = std::find_if(keyStyles.begin(), keyStyles.end(),
-                [&](KeyDef const& style) { return style.id == current.id; });
-            if (match != keyStyles.end()) applyKeyStyle(current, *match);
-            else if (i < keyStyles.size()) {
-                bool slotAlreadyMatched = keyById(keyStyles[i].id) != nullptr;
-                if (!slotAlreadyMatched) applyKeyStyle(current, keyStyles[i]);
-            }
-        }
-    }
-    for (int i = 0; i < StatCount; ++i) {
-        if (!hasStats[i]) continue;
-        auto existing = g_statSettings[i];
-        for (auto const& [key, value] : visualStatStyle(existing)) g_statSettings[i].erase(key);
-        g_statSettings[i].insert(stats[i].begin(), stats[i].end());
-        saveStat(i);
-    }
+    if (styles.empty()) return false;
+    auto match = std::find_if(styles.begin(), styles.end(),
+        [target](KeyDef const& style) { return style.id == target; });
+    auto style = match == styles.end() ? styles.front() : *match;
+    includeInheritedStyle(style, defaults);
+    applyKeyStyle(*current, style);
     return true;
 }
 
@@ -823,17 +809,7 @@ static std::string photoPreset(int index) {
         {"label-color", double(i == 2 ? 0xe6e8ed : 0xfafaff)}, {"label-size", i == 2 ? 8. : 7.},
         {"count-color", double(0xfafaff)}, {"count-size", 7.}
     };
-    std::string data = keyStyleRecord(key, 'A');
-    for (int j = 0; j < StatCount; ++j) {
-        StyleValues stats = {
-            {"background", double(key.bg)}, {"rim", double(key.border)}, {"rim-width", 0.75},
-            {"idle-gradient", 1}, {"gradient-color", double(i == 1 ? 0x385a69 : 0x434d5a)},
-            {"label-color", double(0xfafaff)}, {"count-color", double(0xffffff)},
-            {"label-size", 8.}, {"count-size", 8.}, {"tile-opacity", 228.}, {"roundness", 6.}
-        };
-        data += "T," + std::to_string(j) + "," + encodeStyle(stats) + ";";
-    }
-    return data;
+    return keyStyleRecord(key, 'A');
 }
 
 static int presetCount() {
@@ -1818,8 +1794,20 @@ class EditorInputPopup : public geode::Popup {
     geode::TextInput* m_field = nullptr;
     CCLabelBMFont* m_hint = nullptr;
     std::function<void(int)> m_capture;
+    static inline EditorInputPopup* s_activeCapture = nullptr;
+    static inline int s_skipRelease = 0;
+
+    void stopCapture() {
+        if (s_activeCapture == this) s_activeCapture = nullptr;
+    }
+
+    void onExit() override {
+        stopCapture();
+        Popup::onExit();
+    }
 
     void onClose(CCObject* sender) override {
+        stopCapture();
         if (m_dismiss) {
             auto dismiss = std::move(m_dismiss);
             dismiss();
@@ -1832,16 +1820,26 @@ class EditorInputPopup : public geode::Popup {
         else m_hint->setString(uiText("Enter a valid value.").c_str());
     }
 
-    void keyDown(enumKeyCodes key, double time) override {
-        if (m_capture && key != KEY_Escape && static_cast<int>(key) > 0) {
-            m_capture(static_cast<int>(key));
-            onClose(nullptr);
-            return;
+public:
+    static bool captureKeyboardEvent(enumKeyCodes key, bool down, bool repeat) {
+        const int code = static_cast<int>(key);
+        if (s_skipRelease != 0 && code == s_skipRelease) {
+            if (down && repeat) return true;
+            s_skipRelease = 0;
+            if (!down) return true;
         }
-        Popup::keyDown(key, time);
+        auto popup = s_activeCapture;
+        if (!popup || !down || code <= 0) return false;
+        if (repeat) return true;
+        s_skipRelease = code;
+        if (key != KEY_Escape) {
+            auto bind = std::move(popup->m_capture);
+            bind(code);
+        }
+        popup->onClose(nullptr);
+        return true;
     }
 
-public:
     static EditorInputPopup* create(std::string title, std::string value, bool numeric, Action apply,
                                      std::function<void(int)> capture, std::function<void()> dismiss) {
         auto popup = new EditorInputPopup;
@@ -1854,7 +1852,7 @@ public:
         popup->m_dismiss = std::move(dismiss);
         mkLabel(popup->m_mainLayer, title, 0.52f, kWhite, {120.f, 94.f}, 0.5f);
         if (popup->m_capture) {
-            popup->setKeyboardEnabled(true);
+            s_activeCapture = popup;
             mkLabel(popup->m_mainLayer, "Press a keyboard key", 0.42f, kWhite, {120.f, 55.f}, 0.5f);
         } else {
             popup->m_field = geode::TextInput::create(172.f, "", numeric ? "bigFont.fnt" : "KeyNames.fnt"_spr);
@@ -1895,7 +1893,7 @@ protected:
     bool m_pendingRebuild = false;
     bool m_modal = false;
     int m_statTab = 0;
-    std::string m_undoPreset;
+    std::map<int, std::string> m_undoPreset;
 
     CCDrawNode* m_back = nullptr;
     CCDrawNode* m_chrome = nullptr;
@@ -2438,7 +2436,14 @@ protected:
                 box->layout(statLook(base, stat.metric), stat.width, stat.height);
                 box->setStatValue(samples[stat.metric]);
                 box->tick(nowSec(), 0.f, 0.f);
-                box->setPosition({v.ox + stat.position.x * v.sc, v.oy + stat.position.y * v.sc});
+                CCPoint pos{v.ox + stat.position.x * v.sc, v.oy + stat.position.y * v.sc};
+                box->setPosition(pos);
+                if (m_tab == 2 && m_statTab == stat.metric + 1) {
+                    auto outline = CCDrawNode::create();
+                    float x = pos.x, y = pos.y, width = stat.width * v.sc, height = stat.height * v.sc;
+                    dnStroke(outline, x - 2, y - 2, x + width + 2, y + height + 2, 4.f, kBlue, 1.4f, 4);
+                    m_counterPreview->addChild(outline, 2);
+                }
                 box->setScale(v.sc);
                 m_counterPreview->addChild(box);
             }
@@ -2520,6 +2525,16 @@ protected:
         m_dragMode = 0;
         if (!m_mapMode) this->updateFit();
         View v = this->view();
+
+        if (!m_mapMode && (m_tab == 2 || m_tab == 4)) {
+            for (auto const& box : m_viewer->statGeo()) {
+                CCRect hit(v.ox + box.position.x * v.sc, v.oy + box.position.y * v.sc,
+                           box.width * v.sc, box.height * v.sc);
+                if (!hit.containsPoint(p)) continue;
+                selectStatEditor(box.metric + 1);
+                return;
+            }
+        }
 
         // 선택한 키의 손잡이를 먼저 확인 (지도 모드에서는 이동만 가능)
         if (auto g = this->geoById(m_sel); g && !m_mapMode) {
@@ -2694,10 +2709,12 @@ protected:
         int ri = beginRow(24.f);
         float top = m_rows[ri].top;
         float w = m_inW;
-        rowLabel(ri, label, 0.f, top - 12.f, 0.30f, ccColor3B{235, 235, 240}, 0.f);
+        auto title = rowLabel(ri, label, 0.f, top - 12.f, 0.30f, ccColor3B{235, 235, 240}, 0.f);
         auto d = rowDraw(ri);
-        float zx0 = w - 118.f;
-        float mid = zx0 + 59.f;
+        float pickerWidth = std::min(118.f, w * 0.65f);
+        float zx0 = w - pickerWidth;
+        float mid = zx0 + pickerWidth / 2.f;
+        if (title) title->setScale(std::min(0.30f, std::max(4.f, zx0 - 4.f) / std::max(1.f, title->getContentSize().width)));
         auto val = rowLabel(ri, "", mid, top - 12.f, 0.30f, kWhite, 0.5f);
         int n = static_cast<int>(opts.size());
 
@@ -2709,7 +2726,7 @@ protected:
             if (val) {
                 val->setString(uiText(opts[cur]).c_str());
                 float lw = val->getContentSize().width * 0.30f;
-                float maxW = 76.f;
+                float maxW = std::max(5.f, pickerWidth - 40.f);
                 val->setScale(lw > maxW && lw > 0.f ? 0.30f * maxW / lw : 0.30f);
             }
         };
@@ -2720,7 +2737,7 @@ protected:
         Ctl c;
         c.scroll = true;
         c.row = ri;
-        c.r = CCRect(zx0, top - 24.f, 118.f, 24.f);
+        c.r = CCRect(zx0, top - 24.f, pickerWidth, 24.f);
         c.down = [=](CCPoint p) {
             int cur = std::clamp(get(), 0, n - 1);
             int next = (p.x < mid) ? (cur + n - 1) % n : (cur + 1) % n;
@@ -2841,12 +2858,12 @@ protected:
     }
 
     void applyStylePreset(std::string const& data, std::string const& status) {
-        auto prior = serializePreset();
-        if (!applyPresetData(data)) {
+        auto prior = serializePreset(m_sel);
+        if (!applyPresetData(data, m_sel)) {
             setStatus("Invalid preset.");
             return;
         }
-        m_undoPreset = std::move(prior);
+        m_undoPreset[m_sel] = std::move(prior);
         refreshAll(true);
         m_pendingRebuild = true;
         setStatus(Mod::get()->saveData().isOk() ? status : uiText("Preset storage failed."));
@@ -2869,7 +2886,7 @@ protected:
             applyStylePreset(presetData(i), uiText("Loaded ") + presetName(i));
         };
         actions[1] = [this, i]() {
-            presetSetData(i, serializePreset());
+            presetSetData(i, serializePreset(m_sel));
             this->setStatus(Mod::get()->saveData().isOk() ? uiText("Saved over ") + presetName(i) : uiText("Preset storage failed."));
         };
         actions[2] = [this, i]() {
@@ -3086,7 +3103,10 @@ protected:
         rowButton("Bind keyboard key", {70, 110, 240}, [this, id] {
             showInput("Bind keyboard key", "", false, {}, [this, id](int code) {
                 m_viewer->resetInput();
-                writeStyle(id, "key-code", code);
+                if (writeStyle(id, "key-code", code)) {
+                    (void)Mod::get()->saveData();
+                    setStatus(uiText("Bound key ") + keyName(code));
+                }
             });
         });
         if (code) rowButton("Use game action", {58, 58, 72}, [this, id] {
@@ -3238,15 +3258,40 @@ protected:
         statColor(metric, "Value color", "count-color", -1);
     }
 
+    void selectStatEditor(int index) {
+        m_tab = 2;
+        m_statTab = index;
+        m_scroll = 0.f;
+        m_pendingRebuild = true;
+        redrawChrome();
+        redrawCanvas();
+    }
+
+    void counterPicker() {
+        static const std::array<char const*, 4> labels = {"Key counters", "Total", "KPS", "Peak KPS"};
+        int row = beginRow(55.f);
+        float top = m_rows[row].top;
+        float width = (m_inW - 4.f) / 2.f;
+        auto draw = rowDraw(row);
+        for (int i = 0; i < 4; ++i) {
+            float x = (i % 2) * (width + 4.f);
+            float y = top - 24.f * (1 + i / 2);
+            dnRound(draw, x, y, x + width, y + 20.f, 4.f,
+                    m_statTab == i ? kBlue : ccColor3B{58, 58, 72}, 1.f, 3);
+            auto label = rowLabel(row, labels[i], x + width / 2.f, y + 10.f, 0.28f, kWhite, 0.5f);
+            if (label) label->setScale(std::min(0.28f, (width - 6.f) / std::max(1.f, label->getContentSize().width)));
+            Ctl control;
+            control.row = row;
+            control.r = CCRect(x, y, width, 20.f);
+            control.down = [this, i](CCPoint) { selectStatEditor(i); };
+            m_scrollCtls.push_back(control);
+        }
+    }
+
     void buildCounterTab() {
-        rowCycle("Edit counter", {"Key counters", "Total", "KPS", "Peak KPS"},
-            [this] { return m_statTab; }, [this](int index) {
-                m_statTab = index;
-                m_scroll = 0.f;
-                m_pendingRebuild = true;
-                redrawCanvas();
-            });
+        counterPicker();
         if (m_statTab > 0) {
+            rowInfo(statName(m_statTab - 1));
             buildStatOptions(m_statTab - 1);
             return;
         }
@@ -3329,22 +3374,23 @@ protected:
     }
 
     void buildPresetTab() {
+        rowInfo(uiText("Apply to selected key ") + describeKey(m_sel));
         rowInfo("Reference photo presets");
         for (int i = 0; i < 3; ++i) {
             rowButton(kPhotoPresets[i], {58, 58, 72}, [this, i] {
                 applyStylePreset(photoPreset(i), uiText("Loaded ") + uiText(kPhotoPresets[i]));
             });
         }
-        if (!m_undoPreset.empty()) {
+        if (m_undoPreset.contains(m_sel)) {
             rowButton("Undo preset change", {58, 58, 72}, [this] {
-                auto previous = m_undoPreset;
+                auto previous = m_undoPreset.at(m_sel);
                 applyStylePreset(previous, "Restored prior style.");
             });
         }
         rowButton("Save style as preset", {70, 110, 240}, [this] {
             showInput("Preset name", "", false, [this](std::string const& name) {
                 if (!validName(name)) return false;
-                presetAdd(serializePreset(), name);
+                presetAdd(serializePreset(m_sel), name);
                 setStatus(Mod::get()->saveData().isOk() ? "Saved a new preset." : "Preset storage failed.");
                 return true;
             });
@@ -3569,6 +3615,7 @@ class $modify(KVBaseGameLayer, GJBaseGameLayer) {
 
 class $modify(KVKeyboard, CCKeyboardDispatcher) {
     bool dispatchKeyboardMSG(enumKeyCodes key, bool down, bool repeat, double timestamp) {
+        if (EditorInputPopup::captureKeyboardEvent(key, down, repeat)) return true;
         auto result = CCKeyboardDispatcher::dispatchKeyboardMSG(key, down, repeat, timestamp);
         if (down && repeat) return result;
         auto scene = CCDirector::get()->getRunningScene();
