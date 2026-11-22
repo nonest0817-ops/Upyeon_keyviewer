@@ -635,13 +635,10 @@ static bool applyPresetData(std::string const& data) {
             }
         }
     }
-    {
-
-        g_keys = keys;
-        for (auto const& k : g_keys) g_nextId = std::max(g_nextId, k.id + 1);
-        saveKeyList();
-        for (auto const& k : g_keys) saveKey(k);
-    }
+    g_keys = std::move(keys);
+    for (auto const& k : g_keys) g_nextId = std::max(g_nextId, k.id + 1);
+    saveKeyList();
+    for (auto const& k : g_keys) saveKey(k);
     return true;
 }
 
@@ -690,12 +687,39 @@ static std::array<char const*, 4> const kFonts = {
 
 static void setFont(CCLabelBMFont* label, int font) {
     auto file = kFonts[font];
-    if (std::string_view(label->getFntFile()) != file) label->setFntFile(file);
+    auto current = label->getFntFile();
+    if (!current || std::string_view(current) != file) label->setFntFile(file);
 }
 
 static float labelScale(CCLabelBMFont* label, float height, float maxWidth) {
     auto size = label->getContentSize();
     return std::min(height / std::max(1.f, size.height), maxWidth / std::max(1.f, size.width));
+}
+
+static CCPoint counterPosition(Look const& look, float w, float h, float width, float height) {
+    const bool outside = look.countArea == 1;
+    const float align = look.countAlign * 0.5f;
+    const float gap = look.countGap;
+    if (look.countDirection <= 1) {
+        const bool below = look.countDirection == 0;
+        const float x = width / 2 + (w - width) * align;
+        if (outside) return {x, below ? -gap - height / 2 : h + gap + height / 2};
+        const float inset = std::min(h / 2, height / 2 + gap);
+        return {x, below ? inset : h - inset};
+    }
+    const bool left = look.countDirection == 2;
+    const float y = height / 2 + (h - height) * align;
+    if (outside) return {left ? -width / 2 - gap : w + width / 2 + gap, y};
+    const float inset = std::min(w / 2, width / 2 + gap);
+    return {left ? inset : w - inset, y};
+}
+
+static float textCenterY(Look const& look, float height) {
+    if (!look.counter || look.countArea != 0 || (!look.countFill && look.countOutline <= 0.f))
+        return height / 2.f;
+    if (look.countDirection == 0) return height * 0.65f;
+    if (look.countDirection == 1) return height * 0.35f;
+    return height / 2.f;
 }
 
 struct NoteSprites {
@@ -810,19 +834,8 @@ protected:
         float motion = m_look.countMotion && m_countStart >= 0.0 && t >= 0.f && t < 1.f
             ? m_look.countMotionAmount / 100.f * (1.f - t) : 0.f;
         if (m_look.countMotionType == 0) scale *= 1.f + motion;
-        float gap = m_look.countGap;
-        float align = m_look.countAlign * 0.5f;
-        float x = width / 2 + (m_w - width) * align;
-        float y = m_h * 0.27f;
-        if (m_look.countDirection <= 1) {
-            if (outside) y = m_look.countDirection == 0 ? -gap - height / 2 : m_h + gap + height / 2;
-            else if (m_look.countDirection == 1) y = m_h * 0.73f;
-        } else {
-            const bool left = m_look.countDirection == 2;
-            x = left ? width / 2 + gap : m_w - width / 2 - gap;
-            if (outside) x = left ? -width / 2 - gap : m_w + width / 2 + gap;
-            y = height / 2 + (m_h - height) * align;
-        }
+        auto pos = counterPosition(m_look, m_w, m_h, width, height);
+        float x = pos.x, y = pos.y;
         if (m_look.countMotionType == 1) y += 16.f * motion;
         m_count->setPosition({x, y});
         m_count->setScale(scale);
@@ -929,12 +942,7 @@ public:
         setFont(m_count, l.countFont);
         for (auto border : m_countOutline) setFont(border, l.countFont);
         m_name->setScale(labelScale(m_name, l.labelSize, m_w * 0.84f));
-        float labelY = m_h / 2.f;
-        if (l.counter && l.countArea == 0 && (l.countFill || l.countOutline > 0)) {
-            if (l.countDirection == 0) labelY = m_h * 0.65f;
-            if (l.countDirection == 1) labelY = m_h * 0.35f;
-        }
-        m_name->setPosition({m_w / 2, labelY});
+        m_name->setPosition({m_w / 2, textCenterY(l, m_h)});
         this->fitCount();
 
         this->drawBorder();
@@ -1571,6 +1579,7 @@ protected:
     CCLabelBMFont* m_status = nullptr;
     CCLabelBMFont* m_tabLabels[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
     std::vector<CCLabelBMFont*> m_tileLabels;
+    CCNode* m_counterPreview = nullptr;
     std::vector<Btn> m_btns, m_mapBtns;
 
     std::vector<Ctl> m_fixed, m_scrollCtls;
@@ -1618,6 +1627,8 @@ protected:
         this->addChild(m_canvas, 2);
         m_canvasLabels = CCNode::create();
         this->addChild(m_canvasLabels, 3);
+        m_counterPreview = CCNode::create();
+        m_canvasLabels->addChild(m_counterPreview);
         auto clip = CCClippingNode::create();
         auto stencil = CCDrawNode::create();
         dnRect(stencil, inX0, vpY0, inX1, vpY1, {255, 255, 255}, 1.f);
@@ -2015,8 +2026,37 @@ protected:
         }
     }
 
+    void drawCounterPreview(Look const& look, float x, float y, float w, float h, float zoom, ccColor3B fill) {
+        if (!look.counter || (!look.countFill && look.countOutline <= 0.f)) return;
+        auto sample = CCLabelBMFont::create("12", kFonts[look.countFont]);
+        if (!sample) return;
+        float scale = labelScale(sample, look.countSize, look.countArea == 1 ? 400.f : w * 0.84f);
+        auto dimensions = sample->getContentSize();
+        auto offset = counterPosition(look, w, h, dimensions.width * scale, dimensions.height * scale);
+        CCPoint pos{x + offset.x * zoom, y + offset.y * zoom};
+        if (look.countOutline > 0.f) {
+            for (int i = 0; i < 8; ++i) {
+                auto outline = CCLabelBMFont::create("12", kFonts[look.countFont]);
+                if (!outline) continue;
+                float angle = i * kPi / 4;
+                float radius = look.countOutline * zoom;
+                outline->setPosition({pos.x + std::cos(angle) * radius, pos.y + std::sin(angle) * radius});
+                outline->setScale(scale * zoom);
+                outline->setColor(look.countOutlineColor);
+                m_counterPreview->addChild(outline);
+            }
+        }
+        if (!look.countFill) return;
+        sample->setPosition(pos);
+        sample->setScale(scale * zoom);
+        ccColor3B autoColor = look.countArea == 0 ? lerpC(textFor(fill), fill, 0.45f) : kWhite;
+        sample->setColor(look.countColor < 0 ? autoColor : unpackC(look.countColor));
+        m_counterPreview->addChild(sample, 1);
+    }
+
     void redrawCanvas() {
         m_canvas->clear();
+        m_counterPreview->removeAllChildrenWithCleanup(true);
         for (auto l : m_tileLabels) if (l) l->setVisible(false);
         if (!m_mapMode && m_dragMode == 0) this->updateFit();
 
@@ -2076,9 +2116,10 @@ protected:
                 float lw = lab->getContentSize().width * sc;
                 if (lw > w * 0.84f && lw > 0.f) lab->setScale(sc * w * 0.84f / lw);
                 lab->setColor(kl.labelColor < 0 ? textFor(fill) : unpackC(kl.labelColor));
-                lab->setPosition({(x0 + x1) / 2.f, (y0 + y1) / 2.f});
+                lab->setPosition({(x0 + x1) / 2.f, y0 + textCenterY(kl, h)});
                 lab->setVisible(true);
             }
+            if (!m_mapMode && g.id == m_sel) drawCounterPreview(kl, x0, y0, g.w, g.h, v.sc, fill);
         }
     }
 
