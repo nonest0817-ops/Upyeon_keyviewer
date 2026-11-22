@@ -5,6 +5,7 @@
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <Geode/ui/Popup.hpp>
 #include <Geode/ui/TextInput.hpp>
+#include <Geode/utils/cocos.hpp>
 #include <array>
 #include <set>
 #include <algorithm>
@@ -235,10 +236,25 @@ struct GradientStop {
 
 using GradientStops = std::array<GradientStop, 2>;
 
-static GradientStop gradientAt(GradientStops const& stops, float t) {
+static GradientStop gradientAt(GradientStops const& stops, float t, float opacityPower = 1.f) {
     auto a = unpackC(stops[0].color), b = unpackC(stops[1].color);
-    return {packC(lerpC(a, b, t)),
-            static_cast<int>(std::lround(stops[0].alpha + (stops[1].alpha - stops[0].alpha) * t))};
+    const float progress = std::clamp(t, 0.f, 1.f);
+    const float alphaT = std::pow(progress, opacityPower);
+    return {packC(lerpC(a, b, progress)),
+            static_cast<int>(std::lround(stops[0].alpha + (stops[1].alpha - stops[0].alpha) * alphaT))};
+}
+
+static float timelineFade(float position, float exponent, bool gradient) {
+    float progress = std::clamp(position, 0.f, 1.f);
+    if (progress >= 1.f) return 0.f;
+    if (gradient) progress = std::pow(progress, 1.75f);
+    return std::pow(1.f - progress, std::max(0.f, exponent));
+}
+
+static constexpr float kNoteOpacityCurve = 2.35f;
+
+static GradientStop defaultGradientTip(ccColor3B accent) {
+    return {packC(lerpC(accent, {255, 255, 255}, 0.72f)), 0};
 }
 
 static CCSpriteFrame* makeGradientFrame(GradientStops const& stops) {
@@ -246,7 +262,7 @@ static CCSpriteFrame* makeGradientFrame(GradientStops const& stops) {
     constexpr float radius = 7.f;
     std::array<unsigned char, side * side * 4> pixels{};
     for (int y = 0; y < side; ++y) {
-        auto stop = gradientAt(stops, 1.f - y / float(side - 1));
+        auto stop = gradientAt(stops, 1.f - y / float(side - 1), kNoteOpacityCurve);
         auto color = unpackC(stop.color);
         for (int x = 0; x < side; ++x) {
             float dx = std::max(0.f, std::abs(x + 0.5f - side / 2.f) - (side / 2.f - radius));
@@ -596,7 +612,7 @@ static Look lookForKey(Look const& base, KeyDef const& k) {
     kl.accentLeft = acc;
     kl.accentRight = acc;
     kl.noteGradient[0].color = packC(acc);
-    kl.noteGradient[1].color = packC(acc);
+    kl.noteGradient[1] = defaultGradientTip(acc);
     if (k.bg >= 0) kl.tile = unpackC(k.bg);
     if (k.pressed >= 0) kl.pressed = unpackC(k.pressed);
     if (k.border >= 0) kl.border = unpackC(k.border);
@@ -685,6 +701,227 @@ static float autoWidth(KeyDef const& k, Look const& l) {
 
 // ---------------------------------------------------------------
 // 사용자 프리셋 (현재 설정과 키 목록 전체를 이름 붙여 저장한다)
+// ---------------------------------------------------------------
+enum class SetType { Bool, Num, Int, Color, Str };
+struct SetDef {
+    char const* key;
+    SetType type;
+};
+
+static SetDef const kSetDefs[] = {
+    {"show-timeline", SetType::Bool}, {"show-counter", SetType::Bool},
+    {"show-glow", SetType::Bool}, {"note-glow", SetType::Bool},
+    {"corner-radius", SetType::Num}, {"note-width", SetType::Num},
+    {"note-speed", SetType::Num}, {"note-height", SetType::Num},
+    {"tile-opacity", SetType::Int}, {"note-opacity", SetType::Num},
+    {"note-fade", SetType::Num}, {"note-radius", SetType::Num},
+    {"note-border", SetType::Num}, {"note-glow-strength", SetType::Num}, {"note-glow-size", SetType::Num},
+    {"note-glow-custom", SetType::Bool}, {"note-border-color", SetType::Color}, {"note-glow-color", SetType::Color},
+    {"tile-color", SetType::Color}, {"pressed-color", SetType::Color}, {"accent-jump", SetType::Color},
+    {"accent-left", SetType::Color}, {"accent-right", SetType::Color}, {"gradient-color", SetType::Color},
+    {"gradient-mode", SetType::Str}
+};
+
+static StyleValues visualKeyStyle(KeyDef const& key) {
+    auto style = key.style;
+    style.erase("key-code");
+    style.erase("note-min-length");
+    return style;
+}
+
+static std::string keyStyleRecord(KeyDef const& key, char type) {
+    std::string out(1, type);
+    return out + "," + std::to_string(key.id) + "," + std::to_string(key.bg) + "," +
+        std::to_string(key.pressed) + "," + std::to_string(key.border) + "," +
+        std::to_string(key.accent) + "," + numStr(key.borderW) + "," + numStr(key.radius) + "," +
+        encodeStyle(visualKeyStyle(key)) + ";";
+}
+
+static StyleValues readPresetDefaults() {
+    StyleValues defaults;
+    auto mod = Mod::get();
+    for (auto const& d : kSetDefs) {
+        switch (d.type) {
+            case SetType::Bool: defaults[d.key] = mod->getSettingValue<bool>(d.key); break;
+            case SetType::Num: defaults[d.key] = mod->getSettingValue<double>(d.key); break;
+            case SetType::Int: defaults[d.key] = mod->getSettingValue<int64_t>(d.key); break;
+            case SetType::Color: defaults[d.key] = packC(mod->getSettingValue<ccColor3B>(d.key)); break;
+            case SetType::Str: {
+                auto mode = mod->getSettingValue<std::string>(d.key);
+                defaults[d.key] = mode == "Both" ? 3 : mode == "Tile" ? 2 : mode == "Notes" ? 1 : 0;
+                break;
+            }
+        }
+    }
+    return defaults;
+}
+
+static void includeInheritedStyle(KeyDef& snapshot, StyleValues const& defaults) {
+    auto color = [&](int& field, char const* name) {
+        const auto value = defaults.find(name);
+        if (field < 0 && value != defaults.end()) field = static_cast<int>(std::clamp(value->second, 0., 16777215.));
+    };
+    color(snapshot.bg, "tile-color");
+    color(snapshot.pressed, "pressed-color");
+    color(snapshot.accent, snapshot.map % 3 == 1 ? "accent-left" : snapshot.map % 3 == 2 ? "accent-right" : "accent-jump");
+    if (auto radius = defaults.find("corner-radius"); snapshot.radius < 0.f && radius != defaults.end())
+        snapshot.radius = static_cast<float>(std::clamp(radius->second, 0., 50.));
+    for (auto const& [key, value] : defaults) {
+        if (key == "tile-color" || key == "pressed-color" || key == "corner-radius" ||
+            key == "accent-left" || key == "accent-right" || key == "accent-jump") continue;
+        snapshot.style.try_emplace(key, value);
+    }
+}
+
+static std::string serializePreset(int target) {
+    auto key = keyById(target);
+    if (!key) return {};
+    KeyDef snapshot = *key;
+    auto look = lookForKey(readLook(), *key);
+    snapshot.style["note-gradient-enabled"] = look.gradNotes;
+    snapshot.style["note-gradient-bottom"] = look.noteGradient[0].color;
+    snapshot.style["note-gradient-top"] = look.noteGradient[1].color;
+    snapshot.style["gradient-bottom-alpha"] = look.noteGradient[0].alpha;
+    snapshot.style["gradient-top-alpha"] = look.noteGradient[1].alpha;
+    includeInheritedStyle(snapshot, readPresetDefaults());
+    return keyStyleRecord(snapshot, 'A');
+}
+
+static void applyKeyStyle(KeyDef& current, KeyDef const& style) {
+    current.bg = style.bg;
+    current.pressed = style.pressed;
+    current.border = style.border;
+    current.accent = style.accent;
+    current.borderW = style.borderW;
+    current.radius = style.radius;
+    auto visual = visualKeyStyle(style);
+    if (auto binding = current.style.find("key-code"); binding != current.style.end()) visual.insert(*binding);
+    current.style = std::move(visual);
+    saveKey(current);
+}
+
+static bool applyPresetData(std::string const& data, int target) {
+    auto current = keyById(target);
+    if (!current) return false;
+    std::vector<KeyDef> styles;
+    StyleValues defaults;
+    for (auto const& record : splitStr(data, ';')) {
+        auto fields = splitStr(record, ',');
+        if (fields[0] == "S" && fields.size() == 3) {
+            auto setting = std::find_if(std::begin(kSetDefs), std::end(kSetDefs),
+                [&](SetDef const& d) { return fields[1] == d.key; });
+            if (setting == std::end(kSetDefs)) continue;
+            auto const& value = fields[2];
+            double parsed = setting->type == SetType::Str
+                ? (value == "Both" ? 3 : value == "Tile" ? 2 : value == "Notes" ? 1 : 0)
+                : std::atof(value.c_str());
+            if (std::isfinite(parsed)) defaults[setting->key] = parsed;
+        } else if (fields[0] == "K" || fields[0] == "Y" || fields[0] == "A") {
+            bool legacy = fields[0] == "K";
+            if (fields.size() < (legacy ? 14u : 9u)) return false;
+            KeyDef style;
+            style.id = std::atoi(fields[1].c_str());
+            style.map = legacy ? std::clamp(std::atoi(fields[2].c_str()), 0, 5) : current->map;
+            size_t first = legacy ? 7 : 2;
+            style.bg = std::atoi(fields[first].c_str());
+            style.pressed = std::atoi(fields[first + 1].c_str());
+            style.border = std::atoi(fields[first + 2].c_str());
+            style.accent = std::atoi(fields[first + 3].c_str());
+            style.borderW = static_cast<float>(std::atof(fields[first + 4].c_str()));
+            style.radius = static_cast<float>(std::atof(fields[first + 5].c_str()));
+            size_t styleIndex = legacy ? 14 : 8;
+            if (fields.size() > styleIndex) style.style = decodeStyle(fields[styleIndex]);
+            if (!std::isfinite(style.borderW) || !std::isfinite(style.radius)) return false;
+            style.borderW = std::clamp(style.borderW, 0.f, 6.f);
+            style.radius = std::clamp(style.radius, -1.f, 50.f);
+            styles.push_back(std::move(style));
+        }
+    }
+    if (styles.empty()) return false;
+    auto match = std::find_if(styles.begin(), styles.end(),
+        [target](KeyDef const& style) { return style.id == target; });
+    auto style = match == styles.end() ? styles.front() : *match;
+    includeInheritedStyle(style, defaults);
+    applyKeyStyle(*current, style);
+    return true;
+}
+
+struct GradientPreset {
+    const char* title;
+    int color;
+    int tip;
+    int edge;
+    float glow;
+    float radius;
+};
+
+static const std::array<GradientPreset, 6> kGradientPresets = {{
+    {"Aurora Mint", 0x00c995, 0xacffdc, 0x64eac4, 75.f, 8.f},
+    {"Ocean Blue", 0x1461ff, 0x9cecff, 0x7dd6ff, 100.f, 7.f},
+    {"Pulse Violet", 0x6e39e4, 0xf1bfff, 0xbe9afa, 105.f, 8.f},
+    {"Sunset Coral", 0xff412d, 0xffcf7d, 0xffa177, 80.f, 5.f},
+    {"Red Neon", 0xf40629, 0xffb3be, 0xff5368, 125.f, 5.f},
+    {"Silver Mist", 0x8e9fae, 0xffffff, 0xd6e2ee, 0.f, 4.f},
+}};
+
+static std::string builtInGradientPreset(GradientPreset const& profile) {
+    KeyDef key;
+    key.bg = 0x211d22;
+    key.pressed = 0x4c4750;
+    key.accent = profile.color;
+    key.radius = 8.f;
+    key.style = {
+        {"show-timeline", 1.}, {"note-gradient-enabled", 1.},
+        {"note-gradient-bottom", double(profile.color)}, {"gradient-bottom-alpha", 255.},
+        {"note-gradient-top", double(profile.tip)}, {"gradient-top-alpha", 0.},
+        {"note-width", 90.}, {"note-opacity", 100.}, {"note-speed", 265.},
+        {"note-fade", 0.85}, {"note-radius", double(profile.radius)},
+        {"note-border", 0.65}, {"note-border-color", double(profile.edge)}, {"note-rim-opacity", 48.},
+        {"note-glow", profile.glow > 0.f ? 1. : 0.}, {"note-glow-custom", 1.},
+        {"note-glow-color", double(profile.color)}, {"note-glow-strength", double(profile.glow)},
+        {"note-glow-size", 70.}, {"tile-opacity", 238.}, {"show-glow", 0.}
+    };
+    return keyStyleRecord(key, 'A');
+}
+
+static int presetCount() {
+    return static_cast<int>(Mod::get()->getSavedValue<int64_t>("pr_count", 0));
+}
+
+static std::string presetName(int i) {
+    return Mod::get()->getSavedValue<std::string>("pr_" + std::to_string(i) + "_name", "Preset");
+}
+
+static std::string presetData(int i) {
+    return Mod::get()->getSavedValue<std::string>("pr_" + std::to_string(i) + "_data", "");
+}
+
+static void presetSetData(int i, std::string const& data) {
+    Mod::get()->setSavedValue<std::string>("pr_" + std::to_string(i) + "_data", data);
+}
+
+static void presetAdd(std::string const& data, std::string const& name = {}) {
+    auto m = Mod::get();
+    int n = presetCount();
+    int next = static_cast<int>(m->getSavedValue<int64_t>("pr_next", 1));
+    m->setSavedValue<std::string>("pr_" + std::to_string(n) + "_name", name.empty() ? "Preset " + std::to_string(next) : name);
+    m->setSavedValue<std::string>("pr_" + std::to_string(n) + "_data", data);
+    m->setSavedValue<int64_t>("pr_next", next + 1);
+    m->setSavedValue<int64_t>("pr_count", n + 1);
+}
+
+static void presetDelete(int i) {
+    auto m = Mod::get();
+    int n = presetCount();
+    for (int j = i; j < n - 1; j++) {
+        m->setSavedValue<std::string>("pr_" + std::to_string(j) + "_name", presetName(j + 1));
+        m->setSavedValue<std::string>("pr_" + std::to_string(j) + "_data", presetData(j + 1));
+    }
+    m->setSavedValue<int64_t>("pr_count", std::max(0, n - 1));
+}
+
+// ---------------------------------------------------------------
+// 노트 하나가 쓰는 이미지 3장 (글로우, 본체, 색 그라데이션)
 // ---------------------------------------------------------------
 static std::array<char const*, 4> const kFonts = {
     "InterBold.fnt"_spr, "ViewerUI.fnt"_spr, "bigFont.fnt", "goldFont.fnt"
@@ -1133,7 +1370,7 @@ public:
                 s.hide();
                 continue;
             }
-            float fade = std::pow(1.f - yb / H, std::max(0.f, m_look.noteFade));
+            float fade = timelineFade(yb / H, m_look.noteFade, m_look.gradNotes);
             float sN = noteSpriteScale(noteR, nw, len);
             float py = baseY + yb;
             bool applyGradient = m_look.gradNotes && m_gradientFrame;
@@ -1616,6 +1853,7 @@ struct Ctl {
     int mode = 0; // 0 = 창 모드에서만, 1 = 지도 모드에서만 (스크롤 컨트롤은 창 모드)
     int row = -1;
     std::function<void(CCPoint)> down, move, up;
+    std::function<void(int)> wheel;
 };
 
 struct RowInfo {
@@ -1668,8 +1906,6 @@ class EditorInputPopup : public geode::Popup {
     }
 
 public:
-    void focusInput() { if (m_field) m_field->focus(); }
-
     static bool captureKeyboardEvent(enumKeyCodes key, bool down, bool repeat) {
         const int code = static_cast<int>(key);
         if (s_skipRelease != 0 && code == s_skipRelease) {
@@ -1689,7 +1925,7 @@ public:
         return true;
     }
 
-    static EditorInputPopup* create(std::string title, std::string value, bool numeric, Action apply,
+    static EditorInputPopup* create(std::string title, std::string value, Action apply,
                                      std::function<void(int)> capture, std::function<void()> dismiss) {
         auto popup = new EditorInputPopup;
         if (!popup->Popup::init(240.f, 118.f)) {
@@ -1704,10 +1940,10 @@ public:
             s_activeCapture = popup;
             mkLabel(popup->m_mainLayer, "Press a keyboard key", 0.42f, kWhite, {120.f, 55.f}, 0.5f);
         } else {
-            popup->m_field = geode::TextInput::create(172.f, "", numeric ? "bigFont.fnt" : "KeyNames.fnt"_spr);
+            popup->m_field = geode::TextInput::create(172.f, "", "KeyNames.fnt"_spr);
             popup->m_field->setPosition({120.f, 64.f});
-            popup->m_field->setMaxCharCount(numeric ? 9 : 72);
-            popup->m_field->setFilter(numeric ? std::string("0123456789-.") : nameCharacters());
+            popup->m_field->setMaxCharCount(72);
+            popup->m_field->setFilter(nameCharacters());
             popup->m_field->setString(value.c_str());
             popup->m_mainLayer->addChild(popup->m_field);
             popup->m_hint = mkLabel(popup->m_mainLayer, "", 0.30f, kWhite, {120.f, 41.f}, 0.5f);
@@ -1754,12 +1990,12 @@ static void drawChecker(CCDrawNode* draw, float x, float y, float w, float h, fl
     }
 }
 
-static void drawRamp(CCDrawNode* draw, GradientStops const& stops, float x, float y, float w, float h) {
+static void drawRamp(CCDrawNode* draw, GradientStops const& stops, float x, float y, float w, float h, float curve = 1.f) {
     if (w <= 0 || h <= 0) return;
     drawChecker(draw, x, y, w, h, 4.f);
     constexpr int slices = 36;
     for (int i = 0; i < slices; ++i) {
-        auto color = gradientAt(stops, (i + 0.5f) / slices);
+        auto color = gradientAt(stops, (i + 0.5f) / slices, curve);
         dnRect(draw, x + w * i / slices, y, x + w * (i + 1) / slices, y + h,
                unpackC(color.color), color.alpha / 255.f);
     }
@@ -1786,7 +2022,7 @@ class VisualColorPopup : public geode::Popup {
             dnStrokeA(m_paint, x - radius, y - radius, x + radius, y + radius, radius, mark, 0.85f, 1.f, 5);
         };
         if (m_gradient) {
-            drawRamp(m_paint, m_colors, 22.f, 181.f, 176.f, 12.f);
+            drawRamp(m_paint, m_colors, 22.f, 181.f, 176.f, 12.f, kNoteOpacityCurve);
             cursor(m_stop == 0 ? 22.f : 198.f, 187.f, 4.5f);
         } else {
             dnRound(m_paint, 22.f, 180.f, 198.f, 193.f, 3.f, unpackC(m_colors[0].color), 1.f);
@@ -1934,6 +2170,7 @@ protected:
     bool m_light = true;
     int m_dragStat = -1;
     int m_statTab = 0;
+    std::map<int, std::string> m_undoPreset;
 
     CCDrawNode* m_back = nullptr;
     CCDrawNode* m_chrome = nullptr;
@@ -1945,7 +2182,7 @@ protected:
     CCNode* m_winLabels = nullptr;
     CCNode* m_mapLabels = nullptr;
     CCLabelBMFont* m_status = nullptr;
-    CCLabelBMFont* m_tabLabels[4] = {};
+    CCLabelBMFont* m_tabLabels[5] = {};
     std::vector<CCLabelBMFont*> m_tileLabels;
     CCNode* m_counterPreview = nullptr;
     CCNode* m_notePreview = nullptr;
@@ -2047,9 +2284,9 @@ protected:
 
         // 탭
         {
-            char const* names[4] = {"KEY", "NOTE", "COUNT", "VIEW"};
-            float tw = (inX1 - inX0 - 12.f) / 4.f;
-            for (int i = 0; i < 4; i++) {
+            char const* names[5] = {"KEY", "NOTE", "COUNT", "VIEW", "SETS"};
+            float tw = (inX1 - inX0 - 12.f) / 5.f;
+            for (int i = 0; i < 5; i++) {
                 float x0 = inX0 + 6.f + i * tw;
                 m_tabLabels[i] = mkLabel(m_winLabels, names[i], 0.28f, kWhite,
                                          CCPoint(x0 + tw / 2.f, (tabY0 + inY1 - 2.f) / 2.f), 0.5f);
@@ -2443,8 +2680,8 @@ protected:
         }
         dnRound(m_chrome, cvX0 + 2.f, cvY0 + 2.f, cvX1 - 2.f, cvY0 + 14.f, 3.f, uiPanel(), 0.95f);
         dnRound(m_chrome, inX0, inY0, inX1, inY1, 6.f, uiPanel(), 1.f);
-        float tw = (inX1 - inX0 - 12.f) / 4.f;
-        for (int i = 0; i < 4; ++i) {
+        float tw = (inX1 - inX0 - 12.f) / 5.f;
+        for (int i = 0; i < 5; ++i) {
             float x = inX0 + 6.f + i * tw;
             dnRound(m_chrome, x + 1.f, tabY0, x + tw - 1.f, inY1 - 3.f, 5.f,
                     i == m_tab ? active : uiField(), 1.f, 4);
@@ -2507,7 +2744,7 @@ protected:
             if (!sprites.base) break;
             useGradientFrame(sprites, frame);
             sizeNote(sprites, w, h, rounding, glow);
-            float fade = std::pow(1.f - bottom / look.noteHeight, std::max(0.f, look.noteFade));
+            float fade = timelineFade(bottom / look.noteHeight, look.noteFade, look.gradNotes);
             paintNote(sprites, border, look, (width - w) / 2.f, look.noteBaseGap + bottom, w, h, rounding, glow, fade, frame != nullptr);
             bottom += h + 7.f;
         }
@@ -2789,6 +3026,27 @@ protected:
         m_scrollCtls.push_back(c);
     }
 
+    void wheelField(int row, CCRect bounds, std::string prefix, float min, float max, float step,
+                    std::function<float()> get, std::function<void(float)> set) {
+        float x = bounds.origin.x, y = bounds.origin.y;
+        float w = bounds.size.width, h = bounds.size.height;
+        auto value = rowLabel(row, prefix + fmtNum(get()), x + w / 2.f, y + h / 2.f, 0.29f, uiInk(), 0.5f);
+        auto adjust = [get, set, value, prefix, min, max, step](int direction) {
+            float current = get();
+            float next = std::clamp(std::round((current + direction * step) * 1000.f) / 1000.f, min, max);
+            if (next == current) return;
+            set(next);
+            if (value) value->setString((prefix + fmtNum(get())).c_str());
+        };
+        Ctl ctl;
+        ctl.row = row;
+        ctl.r = bounds;
+        ctl.wheel = adjust;
+        // The left and right halves also work with a tap on touch screens.
+        ctl.down = [adjust, middle = x + w / 2.f](CCPoint point) { adjust(point.x < middle ? -1 : 1); };
+        m_scrollCtls.push_back(ctl);
+    }
+
     void rowNumber(std::string const& label, float min, float max, float step,
                    std::function<float()> get, std::function<void(float)> set) {
         int row = beginRow(27.f);
@@ -2800,21 +3058,7 @@ protected:
         auto draw = rowDraw(row);
         dnRound(draw, x, top - 23.5f, m_inW, top - 3.5f, 5.f, uiField());
         dnStrokeA(draw, x + 0.5f, top - 23.f, m_inW - 0.5f, top - 4.f, 4.f, uiAccent(), 0.75f, 0.56f, 4);
-        rowLabel(row, fmtNum(get()), x + field / 2.f, top - 13.5f, 0.29f, uiInk(), 0.5f);
-        Ctl ctl;
-        ctl.row = row;
-        ctl.r = CCRect(x, top - 25.f, field, 23.f);
-        ctl.down = [this, label, get, set, min, max, step](CCPoint) {
-            showInput(label, fmtNum(get()), true, [set, min, max, step](std::string const& text) {
-                char* end = nullptr;
-                float value = std::strtof(text.c_str(), &end);
-                if (end == text.c_str() || *end || !std::isfinite(value) || value < min || value > max) return false;
-                if (step >= 1.f) value = std::round(value);
-                set(value);
-                return true;
-            });
-        };
-        m_scrollCtls.push_back(ctl);
+        wheelField(row, CCRect(x, top - 24.f, field, 22.f), "", min, max, step, std::move(get), std::move(set));
     }
 
     // 왼쪽 오른쪽 화살표로 선택지를 돌려 고르는 줄
@@ -2880,7 +3124,7 @@ protected:
         float top = m_rows[row].top;
         auto draw = rowDraw(row);
         rowLabel(row, "Edit gradient", 0.f, top - 7.f, 0.28f, uiInk(), 0.f);
-        drawRamp(draw, stops, 1.f, top - 28.f, m_inW - 2.f, 15.f);
+        drawRamp(draw, stops, 1.f, top - 28.f, m_inW - 2.f, 15.f, kNoteOpacityCurve);
         dnStrokeA(draw, 0.5f, top - 28.5f, m_inW - 0.5f, top - 12.5f, 2.f, uiLine(), 0.7f, 0.9f);
         Ctl control;
         control.row = row;
@@ -3005,6 +3249,70 @@ protected:
         m_scrollCtls.push_back(c);
     }
 
+    void applyStylePreset(std::string const& data, std::string const& status) {
+        auto prior = serializePreset(m_sel);
+        if (!applyPresetData(data, m_sel)) {
+            setStatus("Invalid preset.");
+            return;
+        }
+        m_undoPreset[m_sel] = std::move(prior);
+        refreshAll(true);
+        m_pendingRebuild = true;
+        setStatus(Mod::get()->saveData().isOk() ? status : uiText("Preset storage failed."));
+    }
+
+    // 사용자 프리셋 한 줄: 이름 + LOAD / SAVE / DEL
+    void rowPresetEntry(int i) {
+        int ri = beginRow(28.f);
+        float top = m_rows[ri].top;
+        float w = m_inW;
+        auto d = rowDraw(ri);
+        float bw = std::min(32.f, w * 0.22f), bh = 18.f;
+        float y0 = top - 23.f, y1 = y0 + bh;
+        float xs[3] = {w - 3.f * bw - 4.f, w - 2.f * bw - 2.f, w - bw};
+        char const* names[3] = {"LOAD", "SAVE", "DEL"};
+        ccColor3B cols[3] = {{70, 110, 240}, {60, 150, 90}, {170, 70, 80}};
+
+        std::function<void()> actions[3];
+        actions[0] = [this, i]() {
+            applyStylePreset(presetData(i), uiText("Loaded ") + presetName(i));
+        };
+        actions[1] = [this, i]() {
+            presetSetData(i, serializePreset(m_sel));
+            this->setStatus(Mod::get()->saveData().isOk() ? uiText("Saved over ") + presetName(i) : uiText("Preset storage failed."));
+        };
+        actions[2] = [this, i]() {
+            std::string n = presetName(i);
+            presetDelete(i);
+            m_pendingRebuild = true;
+            this->setStatus(Mod::get()->saveData().isOk() ? uiText("Deleted ") + n : uiText("Preset storage failed."));
+        };
+
+        for (int k = 0; k < 3; k++) {
+            dnRound(d, xs[k], y0, xs[k] + bw, y1, 4.f, cols[k], 1.f, 3);
+            rowLabel(ri, names[k], xs[k] + bw / 2.f, (y0 + y1) / 2.f, 0.26f, kWhite, 0.5f);
+            Ctl c;
+            c.scroll = true;
+            c.row = ri;
+            c.r = CCRect(xs[k], y0, bw, bh);
+            auto act = actions[k];
+            c.down = [act](CCPoint) { act(); };
+            m_scrollCtls.push_back(c);
+        }
+
+        auto nameLab = rowLabel(ri, presetName(i), 0.f, (y0 + y1) / 2.f, 0.30f, uiInk(), 0.f);
+        if (nameLab) {
+            auto name = presetName(i);
+            if (hasHangul(name)) {
+                setFont(nameLab, 0, true);
+                nameLab->setString(name.c_str());
+            }
+            float lw = nameLab->getContentSize().width * 0.30f;
+            float maxW = xs[0] - 6.f;
+            if (lw > maxW && lw > 0.f) nameLab->setScale(0.30f * maxW / lw);
+        }
+    }
+
     // 전체 설정(모드 설정)과 연결된 슬라이더, 스위치, 색
     int styleKey() const { return m_tab <= 2 ? m_sel : -1; }
 
@@ -3066,14 +3374,13 @@ protected:
             id >= 0);
     }
 
-    void showInput(std::string title, std::string value, bool numeric,
+    void showInput(std::string title, std::string value,
                    std::function<bool(std::string const&)> apply, std::function<void(int)> capture = {}) {
-        auto popup = EditorInputPopup::create(std::move(title), std::move(value), numeric, std::move(apply),
+        auto popup = EditorInputPopup::create(std::move(title), std::move(value), std::move(apply),
             std::move(capture), [this] { m_modal = false; m_pendingRebuild = true; });
         if (popup) {
             m_modal = true;
             popup->show();
-            if (numeric) popup->focusInput();
         }
     }
 
@@ -3089,28 +3396,18 @@ protected:
             auto key = keyById(id);
             if (!key) return;
             float x = i * (width + 4.f);
-            dnRound(bg, x, top - 39.f, x + width, top - 17.f, 4.f, {58, 58, 72}, 1.f, 3);
-            std::string label = std::string(names[i]) + "  " + fmtNum(key->*fields[i]);
-            rowLabel(row, label, x + width / 2.f, top - 28.f, 0.32f, uiInk(), 0.5f);
-            Ctl ctl;
-            ctl.row = row;
-            ctl.r = CCRect(x, top - 39.f, width, 22.f);
-            ctl.down = [this, id, field = fields[i], min = low[i], max = high[i], name = std::string(names[i])](CCPoint) {
-                auto key = keyById(id);
-                if (!key) return;
-                showInput(name, fmtNum(key->*field), true, [this, id, field, min, max](std::string const& input) {
-                    char* end = nullptr;
-                    float value = std::strtof(input.c_str(), &end);
-                    if (end == input.c_str() || *end || !std::isfinite(value) || value < min || value > max)
-                        return false;
+            dnRound(bg, x, top - 39.f, x + width, top - 17.f, 4.f, uiField(), 1.f, 3);
+            wheelField(row, CCRect(x, top - 39.f, width, 22.f), std::string(names[i]) + "  ", low[i], high[i], 1.f,
+                [id, field = fields[i]] {
+                    auto key = keyById(id);
+                    return key ? key->*field : 0.f;
+                },
+                [this, id, field = fields[i]](float value) {
                     if (auto key = keyById(id)) {
                         key->*field = value;
                         commitKey(id);
                     }
-                    return true;
                 });
-            };
-            m_scrollCtls.push_back(ctl);
         }
     }
 
@@ -3172,7 +3469,7 @@ protected:
         auto key = keyById(id);
         if (!key) return;
         rowButton("Edit key name", {70, 110, 240}, [this, id] {
-            if (auto key = keyById(id)) showInput("Edit key name", labelFor(*key, readLook()), false,
+            if (auto key = keyById(id)) showInput("Edit key name", labelFor(*key, readLook()),
                 [this, id](std::string const& name) {
                     if (!validName(name)) return false;
                     if (auto key = keyById(id)) {
@@ -3186,7 +3483,7 @@ protected:
         int code = lookForKey(readLook(), *key).keyCode;
         rowInfo(code ? uiText("Bound key ") + keyName(code) : uiText("Game action input"));
         rowButton("Bind keyboard key", {70, 110, 240}, [this, id] {
-            showInput("Bind keyboard key", "", false, {}, [this, id](int code) {
+            showInput("Bind keyboard key", "", {}, [this, id](int code) {
                 m_viewer->resetInput();
                 if (writeStyle(id, "key-code", code)) {
                     (void)Mod::get()->saveData();
@@ -3292,7 +3589,7 @@ protected:
         statToggle(metric, "Show box", "visible", metric == TotalMetric ? base.total : metric == KpsMetric && base.kps);
         statChoice(metric, "Box language", "language", {"Same as editor", "Korean", "English"}, 0);
         rowButton("Edit box title", {58, 58, 72}, [this, metric] {
-            showInput("Edit box title", statName(metric), false, [this, metric](std::string const& text) {
+            showInput("Edit box title", statName(metric), [this, metric](std::string const& text) {
                 if (!validName(text)) return false;
                 g_statNames[metric] = text;
                 saveStat(metric);
@@ -3436,6 +3733,32 @@ protected:
         this->settingSlider("Position Y %", "pos-y", 0.f, 100.f, 1.f);
     }
 
+    void buildPresetTab() {
+        rowInfo(uiText("Apply to selected key ") + describeKey(m_sel));
+        if (m_undoPreset.contains(m_sel)) {
+            rowButton("Undo preset change", uiField(), [this] {
+                auto previous = m_undoPreset.at(m_sel);
+                applyStylePreset(previous, "Restored prior style.");
+            });
+        }
+        rowButton("Save style as preset", lerpC(uiField(), uiAccent(), 0.24f), [this] {
+            showInput("Preset name", "", [this](std::string const& name) {
+                if (!validName(name)) return false;
+                auto preset = serializePreset(m_sel);
+                if (preset.empty()) return false;
+                presetAdd(preset, name);
+                setStatus(Mod::get()->saveData().isOk() ? "Saved a new preset." : "Preset storage failed.");
+                return true;
+            });
+        });
+        rowInfo("Gradient presets");
+        for (auto const& preset : kGradientPresets) {
+            rowButton(preset.title, lerpC(uiField(), unpackC(preset.color), m_light ? 0.32f : 0.40f),
+                [this, preset] { applyStylePreset(builtInGradientPreset(preset), uiText("Loaded ") + uiText(preset.title)); });
+        }
+        for (int i = 0; i < presetCount(); ++i) rowPresetEntry(i);
+    }
+
     void rebuildInspector() {
         m_content->removeAllChildrenWithCleanup(true);
         m_scrollCtls.clear();
@@ -3445,6 +3768,7 @@ protected:
         else if (m_tab == 1) this->buildNoteTab();
         else if (m_tab == 2) this->buildCounterTab();
         else if (m_tab == 3) this->buildViewTab();
+        else this->buildPresetTab();
 
         m_contentH = -m_cursor;
         float maxS = std::max(0.f, m_contentH - (vpY1 - vpY0));
@@ -3496,6 +3820,15 @@ protected:
         return -1;
     }
 
+    bool adjustWheelAt(CCPoint cursor, float delta) {
+        int hit = hitScroll(cursor);
+        if (hit < 0) return false;
+        auto control = m_scrollCtls[hit].wheel;
+        if (!control) return false;
+        control(delta < 0.f ? 1 : -1);
+        return true;
+    }
+
 public:
     static KVEditor* create(KeyViewer* viewer) {
         auto ret = new KVEditor();
@@ -3519,7 +3852,7 @@ public:
             auto pos = m_viewer->getPosition();
             Mod::get()->setSettingValue<double>("pos-y", std::clamp((pos.y - delta) / H * 100., 0., 100.));
             refreshAll();
-        } else {
+        } else if (!adjustWheelAt(convertToNodeSpace(geode::cocos::getMousePos()), y)) {
             scrollInspector(delta);
         }
     }
@@ -3594,6 +3927,7 @@ public:
                 next->m_sel = m_sel;
                 next->m_tab = m_tab;
                 next->m_statTab = m_statTab;
+                next->m_undoPreset = m_undoPreset;
                 next->m_scroll = m_scroll;
                 next->setMapMode(false);
                 getParent()->addChild(next, 100000);
@@ -3609,7 +3943,6 @@ public:
             m_closing = false;
             this->setPauseVisible(true);
             m_viewer->applyLook();
-            (void)Mod::get()->saveData();
             (void)Mod::get()->saveData();
             this->removeFromParentAndCleanup(true);
         }

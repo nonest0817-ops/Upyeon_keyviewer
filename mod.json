@@ -8,7 +8,7 @@
   },
   "id": "nonest.keyviewer",
   "name": "Key Viewer",
-  "version": "v1.0.1",
+  "version": "v1.0.2",
   "developer": "nonest",
   "description": "A clean, customizable Geometry Dash input overlay with compact statistics, two-color note gradients, and a light or dark editor.",
   "settings": {
@@ -161,27 +161,27 @@
     "accent-jump": {
       "type": "rgb",
       "default": [
-        255,
-        255,
-        255
+        32,
+        154,
+        242
       ],
       "name": "Jump Note/Glow Color"
     },
     "accent-left": {
       "type": "rgb",
       "default": [
-        255,
-        255,
-        255
+        62,
+        224,
+        169
       ],
       "name": "Left Note/Glow Color"
     },
     "accent-right": {
       "type": "rgb",
       "default": [
-        255,
-        255,
-        255
+        162,
+        102,
+        238
       ],
       "name": "Right Note/Glow Color"
     },

@@ -1,3 +1,9 @@
+# v1.0.2
+
+- Use the mouse wheel over number fields. Touch users can tap either half.
+- Keep the gradient body visible while preserving the color and alpha of the fading tip.
+- Restore selected-key presets and add six gradient styles.
+
 # v1.0.1
 
 - Simplify the editor with light and dark themes and exact numeric fields.
