@@ -8,9 +8,9 @@
   },
   "id": "nonest.keyviewer",
   "name": "Key Viewer",
-  "version": "v0.5.0",
+  "version": "v0.6.0",
   "developer": "nonest",
-  "description": "Dark, glowing key viewer with rising notes, gradient colors, counters, KPS, presets and drag-to-move.",
+  "description": "Dark, glowing key viewer with rising notes, gradient colors, per-key styling and an in-game editor opened from the pause menu.",
   "settings": {
     "preset": {
       "type": "string",
@@ -25,6 +25,12 @@
       ],
       "name": "Preset",
       "description": "Custom uses the settings below. Other presets override colors and effects. Position and size are kept."
+    },
+    "show-viewer": {
+      "type": "bool",
+      "default": true,
+      "name": "Show Key Viewer",
+      "description": "Hide or show the whole key viewer. Also available from the editor window."
     },
     "show-timeline": {
       "type": "bool",
