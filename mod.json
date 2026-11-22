@@ -8,9 +8,9 @@
   },
   "id": "nonest.keyviewer",
   "name": "Key Viewer",
-  "version": "v0.9.4",
+  "version": "v1.0.0",
   "developer": "nonest",
-  "description": "Dark, glowing key viewer with rising notes, gradient colors, add-able keys, user presets and an in-game editor opened from the pause menu.",
+  "description": "A customizable Geometry Dash input overlay with responsive key surfaces, note timelines, activity meters, and a live editor.",
   "settings": {
     "language": {
       "type": "string",
@@ -125,9 +125,9 @@
     "tile-color": {
       "type": "rgb",
       "default": [
-        18,
-        18,
-        22
+        13,
+        20,
+        31
       ],
       "name": "Idle Box Color"
     },
@@ -161,8 +161,8 @@
     "accent-jump": {
       "type": "rgb",
       "default": [
-        255,
-        255,
+        111,
+        222,
         255
       ],
       "name": "Jump Note/Glow Color"
@@ -170,8 +170,8 @@
     "accent-left": {
       "type": "rgb",
       "default": [
-        255,
-        255,
+        176,
+        145,
         255
       ],
       "name": "Left Note/Glow Color"
@@ -179,9 +179,9 @@
     "accent-right": {
       "type": "rgb",
       "default": [
-        255,
-        255,
-        255
+        92,
+        234,
+        202
       ],
       "name": "Right Note/Glow Color"
     },
@@ -346,6 +346,36 @@
       },
       "name": "Position Y (%)",
       "description": "You can also drag the key viewer while the pause menu is open."
+    },
+    "default-surface": {
+      "type": "string",
+      "default": "Alloy",
+      "name": "Default Key Surface",
+      "description": "Choose a finish for keys and statistics boxes that use the default style.",
+      "one-of": [
+        "Classic",
+        "Alloy",
+        "Glass",
+        "Edge"
+      ]
+    },
+    "default-impact": {
+      "type": "string",
+      "default": "Sweep",
+      "name": "Default Press Response",
+      "description": "Choose the default accent animation for a key press.",
+      "one-of": [
+        "Off",
+        "Sweep",
+        "Shockwave",
+        "Sparks"
+      ]
+    },
+    "reduce-motion": {
+      "type": "bool",
+      "default": false,
+      "name": "Reduce Extra Motion",
+      "description": "Disable impact effects, key travel, hold meters and counter animations. Keep the input timeline."
     }
   },
   "resources": {

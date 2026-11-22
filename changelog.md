@@ -1,3 +1,10 @@
+# v1.0.0
+
+- Refresh the editor with an updated palette, color swatches, and live gameplay tile previews.
+- Add Alloy, Glass and Edge finishes, input sweeps, shockwaves, sparks, key travel and hold meters.
+- Add note light strips and optional activity meters for stat tiles.
+- Add six Studio presets and retain the three photo-inspired presets.
+
 # v0.9.4
 
 - Open metric settings with direct buttons or by clicking a preview tile.
