@@ -1,3 +1,10 @@
+# v1.0.4
+
+- Use Geode keyboard events to capture and play exclusively mapped physical keys.
+- Add per-key Player 2 filtering and preserve mappings when applying presets.
+- Remove notes as their leading edge reaches the end of the track.
+- Drag the two gradient stops and configure darkness or brightness along the track.
+
 # v1.0.3
 
 - Add a canvas zoom panel and interactive minimap.

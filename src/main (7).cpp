@@ -2,10 +2,10 @@
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
 #include <Geode/modify/PauseLayer.hpp>
-#include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <Geode/ui/Popup.hpp>
 #include <Geode/ui/TextInput.hpp>
 #include <Geode/utils/cocos.hpp>
+#include <Geode/utils/Keyboard.hpp>
 #include <array>
 #include <set>
 #include <algorithm>
@@ -231,14 +231,28 @@ static CCLabelBMFont* mkLabel(CCNode* parent, std::string const& s, float scale,
 struct GradientStop {
     int color = 0xffffff;
     int alpha = 255;
+    float position = -1.f;
     bool operator==(GradientStop const&) const = default;
 };
 
 using GradientStops = std::array<GradientStop, 2>;
 
+static float stopPosition(GradientStops const& stops, int index) {
+    float position = stops[index].position;
+    return position < 0.f ? static_cast<float>(index) : std::clamp(position, 0.f, 1.f);
+}
+
+static void moveGradientStop(GradientStops& stops, int index, float position) {
+    constexpr float spacing = 0.025f;
+    float lower = index == 0 ? 0.f : std::min(1.f, stopPosition(stops, 0) + spacing);
+    float upper = index == 0 ? std::max(0.f, stopPosition(stops, 1) - spacing) : 1.f;
+    stops[index].position = std::clamp(position, lower, upper);
+}
+
 static GradientStop gradientAt(GradientStops const& stops, float t, float opacityPower = 1.f) {
     auto a = unpackC(stops[0].color), b = unpackC(stops[1].color);
-    const float progress = std::clamp(t, 0.f, 1.f);
+    float start = stopPosition(stops, 0), end = stopPosition(stops, 1);
+    const float progress = std::clamp((t - start) / std::max(0.001f, end - start), 0.f, 1.f);
     const float alphaT = std::pow(progress, opacityPower);
     return {packC(lerpC(a, b, progress)),
             static_cast<int>(std::lround(stops[0].alpha + (stops[1].alpha - stops[0].alpha) * alphaT))};
@@ -262,9 +276,17 @@ static float cornerInset(float localY, float h, float radius) {
     return radius - std::sqrt(std::max(0.f, radius * radius - d * d));
 }
 
+static ccColor3B shadeNote(ccColor3B color, int mode, float strength, float progress) {
+    float amount = std::clamp(progress * strength, 0.f, 1.f);
+    if (mode == 1) return lerpC(color, {0, 0, 0}, amount);
+    if (mode == 2) return lerpC(color, {255, 255, 255}, amount);
+    return color;
+}
+
 // Draw one continuous, full-width fill. Its geometry has no sliced texture regions.
 static void drawNoteRamp(CCDrawNode* draw, GradientStops const& colors, float x, float y,
-                         float w, float h, float rounding, float opacity, bool reverse) {
+                         float w, float h, float rounding, float opacity, bool reverse,
+                         int brightness = 0, float strength = 0.f, float travel = 0.f, float travelSpan = 0.f) {
     float radius = std::clamp(rounding, 0.f, std::min(w, h) * 0.5f);
     int slices = std::clamp(static_cast<int>(std::ceil(h * 0.75f)), 12, 48);
     for (int i = 0; i < slices; ++i) {
@@ -272,11 +294,12 @@ static void drawNoteRamp(CCDrawNode* draw, GradientStops const& colors, float x,
         float y0 = h * t0, y1 = h * t1;
         float i0 = cornerInset(y0, h, radius), i1 = cornerInset(y1, h, radius);
         float t = (t0 + t1) / 2.f;
-        auto stop = gradientAt(colors, reverse ? 1.f - t : t, kNoteOpacityCurve);
+        float along = reverse ? 1.f - t : t;
+        auto stop = gradientAt(colors, along, kNoteOpacityCurve);
         if (stop.alpha == 0) continue;
         CCPoint quad[] = {{x + i0, y + y0}, {x + w - i0, y + y0},
                          {x + w - i1, y + y1}, {x + i1, y + y1}};
-        auto color = premulC(unpackC(stop.color), opacity * stop.alpha / 255.f);
+        auto color = premulC(shadeNote(unpackC(stop.color), brightness, strength, travel + along * travelSpan), opacity * stop.alpha / 255.f);
         draw->drawPolygon(quad, 4, color, 0.f, color);
     }
 }
@@ -297,6 +320,8 @@ struct Look {
     bool gradNotes = false;
     bool gradTile = false;
     bool idleGradient = false;
+    int noteTravelShade = 0;
+    float noteShadeStrength = 0.65f;
     GradientStops noteGradient = {{{0xffffff, 255}, {0xffffff, 0}}};
     std::string labelJump = "JUMP";
     std::string labelLeft = "<";
@@ -339,6 +364,7 @@ struct Look {
     bool noteGlow = true;
     bool resetOnRestart = false;
     int keyCode = 0;
+    bool player2Only = false;
     int labelFont = 0;
     float labelSize = 10.f;
     int labelColor = -1;
@@ -629,6 +655,7 @@ static Look lookForKey(Look const& base, KeyDef const& k) {
     kl.borderW = k.borderW;
     if (k.radius >= 0.f) kl.radius = k.radius / 100.f;
     for (auto const& [key, v] : k.style) {
+        if (key == "p2-only") kl.player2Only = v != 0;
         if (key == "key-code") kl.keyCode = static_cast<int>(std::clamp(v, 0., 65535.));
         if (key == "label-font") kl.labelFont = static_cast<int>(std::clamp(v, 0., 3.));
         if (key == "label-size") kl.labelSize = static_cast<float>(std::clamp(v, 4., 40.));
@@ -637,6 +664,10 @@ static Look lookForKey(Look const& base, KeyDef const& k) {
         if (key == "note-gradient-top") kl.noteGradient[1].color = static_cast<int>(std::clamp(v, 0., 16777215.));
         if (key == "gradient-bottom-alpha") kl.noteGradient[0].alpha = static_cast<int>(std::clamp(v, 0., 255.));
         if (key == "gradient-top-alpha") kl.noteGradient[1].alpha = static_cast<int>(std::clamp(v, 0., 255.));
+        if (key == "gradient-bottom-position") kl.noteGradient[0].position = static_cast<float>(std::clamp(v, 0., 100.)) / 100.f;
+        if (key == "gradient-top-position") kl.noteGradient[1].position = static_cast<float>(std::clamp(v, 0., 100.)) / 100.f;
+        if (key == "note-travel-shade") kl.noteTravelShade = static_cast<int>(std::clamp(v, 0., 2.));
+        if (key == "note-shade-strength") kl.noteShadeStrength = static_cast<float>(std::clamp(v, 0., 100.)) / 100.f;
         if (key == "tile-idle-gradient") kl.idleGradient = v != 0;
         if (key == "note-auto-y") kl.noteAutoY = v != 0;
         if (key == "count-area") kl.countArea = static_cast<int>(std::clamp(v, 0., 1.));
@@ -748,6 +779,7 @@ static SetDef const kSetDefs[] = {
 static StyleValues visualKeyStyle(KeyDef const& key) {
     auto style = key.style;
     style.erase("key-code");
+    style.erase("p2-only");
     style.erase("note-min-length");
     return style;
 }
@@ -806,6 +838,8 @@ static std::string serializePreset(int target) {
     snapshot.style["note-gradient-top"] = look.noteGradient[1].color;
     snapshot.style["gradient-bottom-alpha"] = look.noteGradient[0].alpha;
     snapshot.style["gradient-top-alpha"] = look.noteGradient[1].alpha;
+    snapshot.style["gradient-bottom-position"] = stopPosition(look.noteGradient, 0) * 100.f;
+    snapshot.style["gradient-top-position"] = stopPosition(look.noteGradient, 1) * 100.f;
     includeInheritedStyle(snapshot, readPresetDefaults());
     return keyStyleRecord(snapshot, 'A');
 }
@@ -818,7 +852,7 @@ static void applyKeyStyle(KeyDef& current, KeyDef const& style) {
     current.borderW = style.borderW;
     current.radius = style.radius;
     auto visual = visualKeyStyle(style);
-    for (auto field : {"note-fps", "key-display-delay"}) {
+    for (auto field : {"note-fps", "key-display-delay", "p2-only"}) {
         visual.erase(field);
         if (auto value = current.style.find(field); value != current.style.end()) visual.insert(*value);
     }
@@ -1057,13 +1091,18 @@ static void sizeNote(NoteSprites const& s, float w, float h, float rounding, flo
 }
 
 static void paintNote(NoteSprites const& s, CCDrawNode* fill, CCDrawNode* border, Look const& look,
-                      float x, float y, float w, float h, float rounding, float glowScale, float fade, bool gradient) {
+                      float x, float y, float w, float h, float rounding, float glowScale, float fade,
+                      float position, float trackHeight) {
     float pad = kGlowPad * glowScale;
     float opacity = std::clamp(look.noteOpacity, 0.05f, 1.f) * fade;
     auto accent = look.accentJump;
-    s.base->setVisible(!gradient);
-    if (gradient) {
-        drawNoteRamp(fill, look.noteGradient, x, y, w, h, rounding * kBaseR, opacity, look.reverseFlow);
+    bool ramp = look.gradNotes || look.noteTravelShade != 0;
+    s.base->setVisible(!ramp);
+    if (ramp) {
+        GradientStops colors = look.gradNotes ? look.noteGradient :
+            GradientStops{{{packC(accent), 255}, {packC(accent), 255}}};
+        drawNoteRamp(fill, colors, x, y, w, h, rounding * kBaseR, opacity, look.reverseFlow,
+                     look.noteTravelShade, look.noteShadeStrength, position / trackHeight, h / trackHeight);
     } else {
         placeCenter(s.base, x, y, w, h);
         s.base->setColor(accent);
@@ -1073,10 +1112,11 @@ static void paintNote(NoteSprites const& s, CCDrawNode* fill, CCDrawNode* border
     bool glow = look.noteGlow && look.glowStrength > 0.01f;
     s.glow->setVisible(glow);
     if (glow) {
-        auto color = look.glowCustom ? look.glowColor : gradient ? unpackC(look.noteGradient[0].color) : accent;
+        auto color = look.glowCustom ? look.glowColor : look.gradNotes ? unpackC(look.noteGradient[0].color) : accent;
+        color = shadeNote(color, look.noteTravelShade, look.noteShadeStrength, position / trackHeight);
         placeCenter(s.glow, x - pad, y - pad, w + 2 * pad, h + 2 * pad);
         s.glow->setColor(color);
-        float visible = gradient ? (look.noteGradient[0].alpha + look.noteGradient[1].alpha) / 510.f : 1.f;
+        float visible = look.gradNotes ? (look.noteGradient[0].alpha + look.noteGradient[1].alpha) / 510.f : 1.f;
         setOp(s.glow, 0.45f * look.glowStrength * fade * visible);
     }
 
@@ -1415,14 +1455,22 @@ public:
         }
         float sp = m_look.noteSpeed;
 
-        for (auto it = m_notes.begin(); it != m_notes.end();) {
-            if (it->end >= 0 && (now - it->end) * sp >= H) {
-                this->release(it->sp);
-                it = m_notes.erase(it);
-            } else {
-                ++it;
-            }
-        }
+        auto distance = [&](Note const& note) {
+            double release = note.end < 0 ? now : note.end;
+            return static_cast<float>((now - release) * sp);
+        };
+        auto length = [&](Note const& note) {
+            double release = note.end < 0 ? now : note.end;
+            float result = holdNoteLength(note.start, release, sp, m_look.holdLengthScale, H);
+            if (m_look.fixedShortNotes && note.end >= 0 && note.end - note.start <= m_look.shortNoteTime)
+                result = std::max(result, m_look.shortNoteLength);
+            return result;
+        };
+        std::erase_if(m_notes, [&](Note const& note) {
+            if (distance(note) + length(note) < H) return false;
+            this->release(note.sp);
+            return true;
+        });
 
         float baseY = m_noteStart;
         float nw = std::max(kCap, std::clamp(m_look.noteWidth, 0.2f, 1.f) * m_w);
@@ -1433,28 +1481,27 @@ public:
             auto& s = n.sp;
             if (!s.base) continue;
 
-            double e = n.end < 0 ? now : n.end;
-            float yb = static_cast<float>((now - e) * sp);
-            float len = holdNoteLength(n.start, e, sp, m_look.holdLengthScale, H - yb);
-            if (m_look.fixedShortNotes && n.end >= 0 && n.end - n.start <= m_look.shortNoteTime)
-                len = std::min(H - yb, std::max(len, m_look.shortNoteLength));
+            float yb = distance(n);
+            float len = length(n);
             if (yb >= H || len < 0.05f) {
                 s.hide();
                 continue;
             }
             float fadeProgress = std::max(0.f, (yb / H - m_look.fadeStart) / (1.f - m_look.fadeStart));
             float fade = timelineFade(fadeProgress, m_look.noteFade, m_look.gradNotes);
+            fade *= std::clamp((H - yb - len) / (0.10f * H), 0.f, 1.f);
             float sN = noteSpriteScale(noteR, nw, len);
             float py = m_look.reverseFlow ? -m_look.noteBaseGap - yb - len : baseY + yb;
             if (n.lw != nw || n.lh != len || n.ls != sN || n.lg != sg) {
                 n.lw = nw; n.lh = len; n.ls = sN; n.lg = sg;
                 sizeNote(s, nw, len, sN, sg);
             }
-            paintNote(s, m_noteFill, m_noteBorder, m_look, x0, py, nw, len, sN, sg, fade, m_look.gradNotes);
+            paintNote(s, m_noteFill, m_noteBorder, m_look, x0, py, nw, len, sN, sg, fade, yb, H);
         }
     }
 
     int keyCode() const { return m_look.keyCode; }
+    bool player2Only() const { return m_look.player2Only; }
 
     void tick(double now, float dt, float noteSpace, float availableBelow = 0.f) {
         while (!m_pendingInput.empty() && m_pendingInput.front().time <= now) {
@@ -1541,14 +1588,16 @@ protected:
     float m_poll = 0.f;
     float m_minX = -20.f, m_maxX = 20.f, m_minY = 0.f, m_maxY = 40.f;
     bool m_platformer = false;
+    bool m_twoPlayer = false;
     bool m_editing = false;
     bool m_dragging = false;
     CCPoint m_dragOffset = {0.f, 0.f};
     Look m_look;
 
-    bool init(bool platformer) {
+    bool init(bool platformer, bool twoPlayer) {
         if (!CCLayer::init()) return false;
         m_platformer = platformer;
+        m_twoPlayer = twoPlayer;
         this->setTouchEnabled(true);
 
         m_frame = CCDrawNode::create();
@@ -1599,18 +1648,20 @@ protected:
     }
 
     std::vector<KeyLane*> lanesForMap(int map) {
-        std::vector<KeyLane*> out;
-        for (auto const& k : g_keys) {
-            if (k.map != map) continue;
-            if (auto lane = laneFor(k.id); lane && lane->keyCode() == 0) out.push_back(lane);
+        std::vector<KeyLane*> result;
+        for (auto const& key : g_keys) {
+            auto lane = laneFor(key.id);
+            if (!lane || !lane->isVisible() || lane->keyCode() > 0) continue;
+            int mapping = lane->player2Only() ? 3 + key.map % 3 : key.map;
+            if (mapping == map) result.push_back(lane);
         }
-        return out;
+        return result;
     }
 
 public:
-    static KeyViewer* create(bool platformer) {
+    static KeyViewer* create(bool platformer, bool twoPlayer = false) {
         auto ret = new KeyViewer();
-        if (ret->init(platformer)) {
+        if (ret->init(platformer, twoPlayer)) {
             ret->autorelease();
             return ret;
         }
@@ -1823,7 +1874,8 @@ public:
         }
         m_heldSources |= bit;
         auto targets = lanesForMap(source);
-        if (targets.empty()) targets = lanesForMap((source + 3) % 6);
+        // A non-2P display may mirror dual input. A 2P display never borrows P1 input.
+        if (targets.empty() && source >= 3) targets = lanesForMap(source - 3);
         if (targets.empty()) return;
         for (auto lane : targets) {
             lane->input(source, true, t, m_look.viewerVisible && lane->isVisible(), m_look.viewerVisible);
@@ -1833,12 +1885,14 @@ public:
     }
 
     void onKeyboard(int code, bool down) {
+        if (code <= 0) return;
         double t = nowSec();
         if (down) {
             if (!m_heldKeys.insert(code).second) return;
             bool used = false;
             for (auto& r : m_lanes) {
-                if (r.lane->keyCode() != code || !r.lane->isVisible()) continue;
+                if (r.lane->keyCode() != code || !r.lane->isVisible() ||
+                    (r.lane->player2Only() && !m_twoPlayer)) continue;
                 r.lane->input(6, true, t, m_look.viewerVisible, m_look.viewerVisible);
                 used = true;
             }
@@ -2099,7 +2153,7 @@ class VisualColorPopup : public geode::Popup {
                 float x = i == 0 ? 22.f : 117.f;
                 dnRound(m_paint, x, 171.f, x + 81.f, 180.f, 3.f,
                         i == m_stop ? lerpC(field, mark, 0.18f) : field);
-                cursor(i == 0 ? 22.f : 198.f, 187.f, i == m_stop ? 4.5f : 3.f);
+                cursor(22.f + 176.f * stopPosition(m_colors, i), 187.f, i == m_stop ? 4.5f : 3.f);
             }
         } else {
             dnRound(m_paint, 22.f, 180.f, 198.f, 193.f, 3.f, unpackC(m_colors[0].color), 1.f);
@@ -2136,6 +2190,8 @@ class VisualColorPopup : public geode::Popup {
             m_hsv[0] = t;
         } else if (m_drag == 3) {
             m_colors[m_stop].alpha = static_cast<int>(std::lround(t * 255.f));
+        } else if (m_drag == 5) {
+            moveGradientStop(m_colors, m_stop, t);
         }
         if (m_drag == 1 || m_drag == 2) m_colors[m_stop].color = packC(hsvColor(m_hsv[0], m_hsv[1], m_hsv[2]));
         refresh();
@@ -2159,6 +2215,7 @@ public:
         }
         popup->m_colors = stops;
         popup->m_gradient = gradient;
+        popup->setTouchEnabled(true);
         popup->setMouseEnabled(gradient);
         popup->m_light = light;
         popup->m_hsv = hsvFromColor(stops[0].color);
@@ -2193,7 +2250,15 @@ public:
 
     bool ccTouchBegan(CCTouch* touch, CCEvent* event) override {
         auto p = m_mainLayer->convertTouchToNodeSpace(touch);
-        if (m_gradient && CCRect(16.f, 171.f, 188.f, 27.f).containsPoint(p)) {
+        if (m_gradient && CCRect(15.f, 180.f, 190.f, 17.f).containsPoint(p)) {
+            float t = (p.x - 22.f) / 176.f;
+            m_stop = std::abs(t - stopPosition(m_colors, 0)) <= std::abs(t - stopPosition(m_colors, 1)) ? 0 : 1;
+            m_hsv = hsvFromColor(m_colors[m_stop].color);
+            m_drag = 5;
+            refresh();
+            return true;
+        }
+        if (m_gradient && CCRect(16.f, 171.f, 188.f, 9.f).containsPoint(p)) {
             m_stop = p.x < 110.f ? 0 : 1;
             m_hsv = hsvFromColor(m_colors[m_stop].color);
             refresh();
@@ -2220,7 +2285,7 @@ public:
     }
 
     void ccTouchMoved(CCTouch* touch, CCEvent*) override {
-        if (m_drag > 0 && m_drag < 4) updateColor(m_mainLayer->convertTouchToNodeSpace(touch));
+        if (m_drag && m_drag != 4) updateColor(m_mainLayer->convertTouchToNodeSpace(touch));
     }
     void ccTouchEnded(CCTouch* touch, CCEvent*) override {
         bool confirm = m_drag == 4 &&
@@ -2894,6 +2959,7 @@ protected:
         d.label = k->label;
         d.text = k->text;
         if (auto it = k->style.find("key-code"); it != k->style.end()) d.style.insert(*it);
+        if (auto it = k->style.find("p2-only"); it != k->style.end()) d.style.insert(*it);
         d.x = k->x;
         d.y = k->y;
         *k = d;
@@ -3153,7 +3219,7 @@ protected:
             sizeNote(sprites, w, h, rounding, glow);
             float fade = timelineFade(bottom / look.noteHeight, look.noteFade, look.gradNotes);
             float y = look.reverseFlow ? -look.noteBaseGap - bottom - h : look.noteBaseGap + bottom;
-            paintNote(sprites, fill, border, look, (width - w) / 2.f, y, w, h, rounding, glow, fade, look.gradNotes);
+            paintNote(sprites, fill, border, look, (width - w) / 2.f, y, w, h, rounding, glow, fade, bottom, look.noteHeight);
             bottom += h + 7.f;
         }
     }
@@ -3553,6 +3619,8 @@ protected:
                 current->style["note-gradient-top"] = changed[1].color;
                 current->style["gradient-bottom-alpha"] = changed[0].alpha;
                 current->style["gradient-top-alpha"] = changed[1].alpha;
+                current->style["gradient-bottom-position"] = stopPosition(changed, 0) * 100.f;
+                current->style["gradient-top-position"] = stopPosition(changed, 1) * 100.f;
                 commitKey(id);
             });
         };
@@ -3895,6 +3963,12 @@ protected:
         });
         int code = lookForKey(readLook(), *key).keyCode;
         rowInfo(code ? uiText("Bound key ") + keyName(code) : uiText("Game action input"));
+        rowToggle("Player 2 only",
+            [id] { return styleValue(id, "p2-only", 0) != 0; },
+            [this, id](bool enabled) {
+                m_viewer->resetInput();
+                writeStyle(id, "p2-only", enabled);
+            });
         rowButton("Bind keyboard key", {70, 110, 240}, [this, id] {
             showInput("Bind keyboard key", "", {}, [this, id](int code) {
                 m_viewer->resetInput();
@@ -3965,6 +4039,8 @@ protected:
             [id] { auto key = keyById(id); return key && lookForKey(readLook(), *key).gradNotes; },
             [this, id](bool enabled) { writeStyle(id, "note-gradient-enabled", enabled); });
         rowGradient(id);
+        localChoice("Brightness along track", "note-travel-shade", {"Off", "Darker upward", "Brighter upward"}, 0);
+        localSlider("Track brightness strength %", "note-shade-strength", 0.f, 100.f, 5.f, 65.f);
         this->settingSlider("Note opacity %", "note-opacity", 20.f, 100.f, 1.f);
         this->settingSlider("Note fade", "note-fade", 0.f, 3.f, 0.1f);
         this->settingSlider("Note round %", "note-radius", 0.f, 50.f, 1.f);
@@ -4382,10 +4458,23 @@ class $modify(KVPlayLayer, PlayLayer) {
 
     void setupHasCompleted() {
         PlayLayer::setupHasCompleted();
-        auto viewer = KeyViewer::create(m_levelSettings->m_platformerMode);
+        auto viewer = KeyViewer::create(m_levelSettings->m_platformerMode, m_levelSettings->m_twoPlayerMode);
         if (!viewer) return;
         this->addChild(viewer, 1000);
         m_fields->viewer = viewer;
+        viewer->addEventListener(geode::KeyboardInputEvent(), [viewer](geode::KeyboardInputData& event) {
+            using Action = geode::KeyboardInputData::Action;
+            bool down = event.action != Action::Release;
+            if (EditorInputPopup::captureKeyboardEvent(event.key, down, event.action == Action::Repeat))
+                return geode::ListenerResult::Stop;
+            if (event.action != Action::Repeat) {
+                auto scene = CCDirector::get()->getRunningScene();
+                auto play = PlayLayer::get();
+                if (play && scene && viewer->getParent() == play && (!down || !scene->getChildByType<PauseLayer>(0)))
+                    viewer->onKeyboard(static_cast<int>(event.key), down);
+            }
+            return geode::ListenerResult::Propagate;
+        }, -1000);
     }
 
     void resetLevel() {
@@ -4402,21 +4491,6 @@ class $modify(KVBaseGameLayer, GJBaseGameLayer) {
         if (!pl) return;
         auto viewer = static_cast<KVPlayLayer*>(pl)->m_fields->viewer;
         if (viewer) viewer->onButton(button, down, isPlayer1);
-    }
-};
-
-class $modify(KVKeyboard, CCKeyboardDispatcher) {
-    bool dispatchKeyboardMSG(enumKeyCodes key, bool down, bool repeat, double timestamp) {
-        if (EditorInputPopup::captureKeyboardEvent(key, down, repeat)) return true;
-        auto result = CCKeyboardDispatcher::dispatchKeyboardMSG(key, down, repeat, timestamp);
-        if (down && repeat) return result;
-        auto scene = CCDirector::get()->getRunningScene();
-        auto play = PlayLayer::get();
-        if (!play || !scene) return result;
-        auto viewer = static_cast<KVPlayLayer*>(play)->m_fields->viewer;
-        if (viewer && (!down || !scene->getChildByType<PauseLayer>(0)))
-            viewer->onKeyboard(static_cast<int>(key), down);
-        return result;
     }
 };
 

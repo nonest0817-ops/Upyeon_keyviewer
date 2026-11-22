@@ -8,7 +8,7 @@
   },
   "id": "nonest.keyviewer",
   "name": "Key Viewer",
-  "version": "v1.0.3",
+  "version": "v1.0.4",
   "developer": "nonest",
   "description": "A clean, customizable Geometry Dash input overlay with compact statistics, two-color note gradients, and a light or dark editor.",
   "settings": {
