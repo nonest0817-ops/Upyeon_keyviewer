@@ -3262,7 +3262,7 @@ protected:
         m_tab = 2;
         m_statTab = index;
         m_scroll = 0.f;
-        m_pendingRebuild = true;
+        rebuildInspector();
         redrawChrome();
         redrawCanvas();
     }
