@@ -240,27 +240,46 @@ struct GradientStop {
     bool operator==(GradientStop const&) const = default;
 };
 
-using GradientStops = std::array<GradientStop, 2>;
+struct GradientStops {
+    GradientStop points[3];
+    int count = 2;
+
+    GradientStop& operator[](int index) { return points[index]; }
+    GradientStop const& operator[](int index) const { return points[index]; }
+};
+
+static constexpr float kGradientSpacing = 0.025f;
 
 static float stopPosition(GradientStops const& stops, int index) {
     float position = stops[index].position;
-    return position < 0.f ? static_cast<float>(index) : std::clamp(position, 0.f, 1.f);
+    return position < 0.f ? static_cast<float>(index) / (stops.count - 1) : std::clamp(position, 0.f, 1.f);
+}
+
+static void normalizeGradient(GradientStops& stops) {
+    float lower = 0.f;
+    for (int i = 0; i < stops.count; ++i) {
+        float upper = 1.f - (stops.count - 1 - i) * kGradientSpacing;
+        stops[i].position = std::min(upper, std::max(lower, stopPosition(stops, i)));
+        lower = stops[i].position + kGradientSpacing;
+    }
 }
 
 static void moveGradientStop(GradientStops& stops, int index, float position) {
-    constexpr float spacing = 0.025f;
-    float lower = index == 0 ? 0.f : std::min(1.f, stopPosition(stops, 0) + spacing);
-    float upper = index == 0 ? std::max(0.f, stopPosition(stops, 1) - spacing) : 1.f;
-    stops[index].position = std::clamp(position, lower, upper);
+    float lower = index == 0 ? 0.f : stopPosition(stops, index - 1) + kGradientSpacing;
+    float upper = index == stops.count - 1 ? 1.f : stopPosition(stops, index + 1) - kGradientSpacing;
+    stops[index].position = std::min(upper, std::max(lower, position));
 }
 
 static GradientStop gradientAt(GradientStops const& stops, float t, float opacityPower = 1.f) {
-    auto a = unpackC(stops[0].color), b = unpackC(stops[1].color);
-    float start = stopPosition(stops, 0), end = stopPosition(stops, 1);
+    int next = 1;
+    if (stops.count == 3 && t > stopPosition(stops, 1)) next = 2;
+    auto const& a = stops[next - 1];
+    auto const& b = stops[next];
+    float start = stopPosition(stops, next - 1), end = stopPosition(stops, next);
     const float progress = std::clamp((t - start) / std::max(0.001f, end - start), 0.f, 1.f);
     const float alphaT = std::pow(progress, opacityPower);
-    return {packC(lerpC(a, b, progress)),
-            static_cast<int>(std::lround(stops[0].alpha + (stops[1].alpha - stops[0].alpha) * alphaT))};
+    return {packC(lerpC(unpackC(a.color), unpackC(b.color), progress)),
+            static_cast<int>(std::lround(a.alpha + (b.alpha - a.alpha) * alphaT))};
 }
 
 static float timelineFade(float position, float exponent, bool gradient) {
@@ -481,6 +500,8 @@ static constexpr int kLabelCount = static_cast<int>(sizeof(kLabels) / sizeof(kLa
 static char const* const kMapNames[6] = {"Jump P1", "Left P1", "Right P1", "Jump P2", "Left P2", "Right P2"};
 
 static std::vector<KeyDef> g_keys;
+static std::vector<KeyDef> g_keyClipboard;
+static unsigned g_clipboardPastes = 0;
 static int g_nextId = 0;
 static bool g_keysLoaded = false;
 
@@ -638,6 +659,13 @@ static Look lookForKey(Look const& base, KeyDef const& k) {
     kl.accentRight = acc;
     kl.noteGradient[0].color = packC(acc);
     kl.noteGradient[1] = defaultGradientTip(acc);
+    if (auto count = k.style.find("gradient-stop-count"); count != k.style.end() && count->second == 3.) {
+        auto middle = gradientAt(kl.noteGradient, 0.5f, kNoteOpacityCurve);
+        kl.noteGradient[2] = kl.noteGradient[1];
+        kl.noteGradient[1] = middle;
+        kl.noteGradient.count = 3;
+    }
+    auto& tip = kl.noteGradient[kl.noteGradient.count - 1];
     if (k.bg >= 0) kl.tile = unpackC(k.bg);
     if (k.pressed >= 0) kl.pressed = unpackC(k.pressed);
     if (k.border >= 0) kl.border = unpackC(k.border);
@@ -650,11 +678,17 @@ static Look lookForKey(Look const& base, KeyDef const& k) {
         if (key == "label-size") kl.labelSize = static_cast<float>(std::clamp(v, 4., 40.));
         if (key == "label-color") kl.labelColor = static_cast<int>(std::clamp(v, 0., 16777215.));
         if (key == "note-gradient-bottom") kl.noteGradient[0].color = static_cast<int>(std::clamp(v, 0., 16777215.));
-        if (key == "note-gradient-top") kl.noteGradient[1].color = static_cast<int>(std::clamp(v, 0., 16777215.));
+        if (key == "note-gradient-top") tip.color = static_cast<int>(std::clamp(v, 0., 16777215.));
         if (key == "gradient-bottom-alpha") kl.noteGradient[0].alpha = static_cast<int>(std::clamp(v, 0., 255.));
-        if (key == "gradient-top-alpha") kl.noteGradient[1].alpha = static_cast<int>(std::clamp(v, 0., 255.));
+        if (key == "gradient-top-alpha") tip.alpha = static_cast<int>(std::clamp(v, 0., 255.));
         if (key == "gradient-bottom-position") kl.noteGradient[0].position = static_cast<float>(std::clamp(v, 0., 100.)) / 100.f;
-        if (key == "gradient-top-position") kl.noteGradient[1].position = static_cast<float>(std::clamp(v, 0., 100.)) / 100.f;
+        if (key == "gradient-top-position") tip.position = static_cast<float>(std::clamp(v, 0., 100.)) / 100.f;
+        if (kl.noteGradient.count == 3) {
+            auto& middle = kl.noteGradient[1];
+            if (key == "note-gradient-middle") middle.color = static_cast<int>(std::clamp(v, 0., 16777215.));
+            if (key == "gradient-middle-alpha") middle.alpha = static_cast<int>(std::clamp(v, 0., 255.));
+            if (key == "gradient-middle-position") middle.position = static_cast<float>(std::clamp(v, 0., 100.)) / 100.f;
+        }
         if (key == "note-track-gradient") kl.noteTrackGradient = v != 0;
         if (key == "note-travel-shade") kl.noteTravelShade = static_cast<int>(std::clamp(v, 0., 2.));
         if (key == "note-shade-strength") kl.noteShadeStrength = static_cast<float>(std::clamp(v, 0., 100.)) / 100.f;
@@ -716,6 +750,7 @@ static Look lookForKey(Look const& base, KeyDef const& k) {
     // Explicit note settings take precedence over the legacy combined tile/notes selector.
     if (auto it = k.style.find("note-gradient-enabled"); it != k.style.end()) kl.gradNotes = it->second != 0;
     kl.gradTile = kl.gradTile || kl.idleGradient;
+    normalizeGradient(kl.noteGradient);
     return kl;
 }
 
@@ -818,18 +853,33 @@ static void includeInheritedStyle(KeyDef& snapshot, StyleValues const& defaults)
     }
 }
 
+static void storeNoteGradient(StyleValues& style, GradientStops const& stops) {
+    int tip = stops.count - 1;
+    style["gradient-stop-count"] = stops.count;
+    style["note-gradient-bottom"] = stops[0].color;
+    style["note-gradient-top"] = stops[tip].color;
+    style["gradient-bottom-alpha"] = stops[0].alpha;
+    style["gradient-top-alpha"] = stops[tip].alpha;
+    style["gradient-bottom-position"] = stopPosition(stops, 0) * 100.f;
+    style["gradient-top-position"] = stopPosition(stops, tip) * 100.f;
+    if (stops.count == 3) {
+        style["note-gradient-middle"] = stops[1].color;
+        style["gradient-middle-alpha"] = stops[1].alpha;
+        style["gradient-middle-position"] = stopPosition(stops, 1) * 100.f;
+    } else {
+        style.erase("note-gradient-middle");
+        style.erase("gradient-middle-alpha");
+        style.erase("gradient-middle-position");
+    }
+}
+
 static std::string serializePreset(int target) {
     auto key = keyById(target);
     if (!key) return {};
     KeyDef snapshot = *key;
     auto look = lookForKey(readLook(), *key);
     snapshot.style["note-gradient-enabled"] = look.gradNotes;
-    snapshot.style["note-gradient-bottom"] = look.noteGradient[0].color;
-    snapshot.style["note-gradient-top"] = look.noteGradient[1].color;
-    snapshot.style["gradient-bottom-alpha"] = look.noteGradient[0].alpha;
-    snapshot.style["gradient-top-alpha"] = look.noteGradient[1].alpha;
-    snapshot.style["gradient-bottom-position"] = stopPosition(look.noteGradient, 0) * 100.f;
-    snapshot.style["gradient-top-position"] = stopPosition(look.noteGradient, 1) * 100.f;
+    storeNoteGradient(snapshot.style, look.noteGradient);
     includeInheritedStyle(snapshot, readPresetDefaults());
     return keyStyleRecord(snapshot, 'A');
 }
@@ -910,9 +960,15 @@ struct GradientPreset {
     float speed = 265.f;
     float width = 90.f;
     bool trackGradient = false;
+    float borderWidth = 0.85f;
+    std::optional<GradientStop> middle = std::nullopt;
 };
 
-static const std::array<GradientPreset, 7> kGradientPresets = {{
+static const std::array<GradientPreset, 8> kGradientPresets = {{
+    {.title = "Glacier Cyan", .color = 0x42e8f5, .tip = 0x37486d, .edge = 0xe6faff, .glow = 38.f,
+     .radius = 6.f, .fade = 1.1f, .rim = 91.f, .fadeStart = 0.f, .speed = 290.f,
+     .width = 98.f, .trackGradient = true, .borderWidth = 1.15f,
+     .middle = GradientStop{0x43a5c2, 178, 0.52f}},
     {"Cyan Flow", 0x00e5ff, 0x607da8, 0xccecff, 22.f, 4.f, 1.65f, 84.f, 0.f, 300.f, 100.f, true},
     {"Aurora Mint", 0x00c995, 0xacffdc, 0x64eac4, 75.f, 8.f},
     {"Ocean Blue", 0x1461ff, 0x9cecff, 0x7dd6ff, 100.f, 7.f},
@@ -930,16 +986,21 @@ static std::string builtInGradientPreset(GradientPreset const& profile) {
     key.radius = 8.f;
     key.style = {
         {"show-timeline", 1.}, {"note-gradient-enabled", 1.},
-        {"note-gradient-bottom", double(profile.color)}, {"gradient-bottom-alpha", 255.},
-        {"note-gradient-top", double(profile.tip)}, {"gradient-top-alpha", 0.},
         {"note-track-gradient", profile.trackGradient ? 1. : 0.},
         {"note-width", profile.width}, {"note-opacity", 100.}, {"note-speed", profile.speed},
         {"note-fade", profile.fade}, {"note-radius", profile.radius},
-        {"note-border", 0.85}, {"note-border-color", double(profile.edge)}, {"note-rim-opacity", profile.rim},
+        {"note-border", profile.borderWidth}, {"note-border-color", double(profile.edge)}, {"note-rim-opacity", profile.rim},
         {"note-glow", profile.glow > 0.f ? 1. : 0.}, {"note-glow-custom", 1.},
         {"note-glow-color", double(profile.color)}, {"note-glow-strength", double(profile.glow)},
         {"note-glow-size", 70.}, {"tile-opacity", 238.}, {"show-glow", 0.}
     };
+    GradientStops stops = {{{profile.color, 255}, {profile.tip, 0}}};
+    if (profile.middle) {
+        stops[2] = stops[1];
+        stops[1] = *profile.middle;
+        stops.count = 3;
+    }
+    storeNoteGradient(key.style, stops);
     if (profile.fadeStart >= 0.f) key.style["fade-start"] = profile.fadeStart;
     return keyStyleRecord(key, 'A');
 }
@@ -1208,12 +1269,12 @@ static void paintNote(CCDrawNode* draw, CCDrawNode* glow, Look const& look, floa
     auto colors = look.noteGradient;
     if (!look.gradNotes) colors = {{{packC(look.accentJump), 255}, {packC(look.accentJump), 255}}};
     std::vector<float> rows{0.f, visible};
-    rows.reserve(44);
+    rows.reserve(46);
     addCorners(rows, 0.f, length, radius);
     if (rim > 0.f) addCorners(rows, rim, length - rim, std::max(0.f, radius - rim));
     if (look.gradNotes || look.noteTravelShade || look.noteFade > 0.f) {
         for (int i = 1; i < 20; ++i) rows.push_back(visible * i / 20.f);
-        for (int i = 0; i < 2; ++i) {
+        for (int i = 0; i < colors.count; ++i) {
             float stop = stopPosition(colors, i);
             rows.push_back(look.noteTrackGradient ? trackHeight * stop - position : length * stop);
         }
@@ -1271,24 +1332,14 @@ struct Note {
 
 struct NoteSpan { float distance; float length; };
 
-static std::array<NoteSpan, 2> noteSpans(Note const& note, Look const& look, double now, float trackHeight) {
-    const double travelTime = trackHeight / static_cast<double>(look.noteSpeed);
-    const double firstCut = note.start + travelTime / look.holdLengthScale;
-    const double end = note.end < 0. ? now : note.end;
-    auto traveled = [&](double time) { return static_cast<float>(std::max(0., now - time) * look.noteSpeed); };
-    if (end < firstCut) {
-        float length = holdNoteLength(note.start, end, look.noteSpeed, look.holdLengthScale, trackHeight);
-        if (look.fixedShortNotes && note.end >= 0. && note.end - note.start <= look.shortNoteTime)
-            length = std::max(length, look.shortNoteLength);
-        return {{{0.f, 0.f}, {traveled(end), length}}};
-    }
-
-    // Feed a new segment from the key as the previous one leaves. After the
-    // first segment, advancing at track speed keeps their boundaries together.
-    const double segmentStart = firstCut + std::floor((end - firstCut) / travelTime) * travelTime;
-    const float seam = std::min(2.5f, trackHeight * 0.10f);
-    float length = holdNoteLength(segmentStart, end, look.noteSpeed, 1.f, trackHeight);
-    return {{{traveled(segmentStart) + seam, trackHeight - seam}, {traveled(end), length}}};
+static NoteSpan noteSpan(Note const& note, Look const& look, double now, float trackHeight) {
+    const double fillTime = trackHeight / (static_cast<double>(look.noteSpeed) * look.holdLengthScale);
+    const double pressedUntil = note.end < 0. ? now : note.end;
+    const double tailStart = std::min(note.start + fillTime, pressedUntil);
+    float length = holdNoteLength(note.start, tailStart, look.noteSpeed, look.holdLengthScale, trackHeight);
+    if (look.fixedShortNotes && note.end >= 0. && note.end - note.start <= look.shortNoteTime)
+        length = std::max(length, look.shortNoteLength);
+    return {static_cast<float>(std::max(0., now - tailStart) * look.noteSpeed), length};
 }
 
 // ---------------------------------------------------------------
@@ -1594,18 +1645,15 @@ public:
             clearNotes();
             return;
         }
-        std::erase_if(m_notes, [&](Note const& note) {
-            return note.end >= 0. && (now - note.end) * m_look.noteSpeed >= H;
-        });
+        std::erase_if(m_notes, [&](Note const& note) { return noteSpan(note, m_look, now, H).distance >= H; });
 
         float nw = std::max(2.f, m_look.noteWidth * m_w);
         float x = (m_w - nw) / 2.f;
         for (auto const& note : m_notes) {
-            for (auto span : noteSpans(note, m_look, now, H)) {
-                if (span.distance >= H || span.length < 0.05f) continue;
-                float y = m_look.reverseFlow ? -m_look.noteBaseGap - span.distance : m_noteStart + span.distance;
-                paintNote(m_noteFill, m_noteGlow, m_look, x, y, nw, span.length, span.distance, H);
-            }
+            auto span = noteSpan(note, m_look, now, H);
+            if (span.length < 0.05f) continue;
+            float y = m_look.reverseFlow ? -m_look.noteBaseGap - span.distance : m_noteStart + span.distance;
+            paintNote(m_noteFill, m_noteGlow, m_look, x, y, nw, span.length, span.distance, H);
         }
     }
 
@@ -2371,10 +2419,19 @@ static void drawRamp(CCDrawNode* draw, GradientStops const& stops, float x, floa
     if (w <= 0 || h <= 0) return;
     drawChecker(draw, x, y, w, h, 4.f);
     constexpr int slices = 36;
-    for (int i = 0; i < slices; ++i) {
-        auto color = gradientAt(stops, (i + 0.5f) / slices, curve);
-        dnRect(draw, x + w * i / slices, y, x + w * (i + 1) / slices, y + h,
-               unpackC(color.color), color.alpha / 255.f);
+    std::array<float, slices + 4> samples;
+    for (int i = 0; i <= slices; ++i) samples[i] = static_cast<float>(i) / slices;
+    for (int i = 0; i < stops.count; ++i) samples[slices + 1 + i] = stopPosition(stops, i);
+    auto end = samples.begin() + slices + 1 + stops.count;
+    std::sort(samples.begin(), end);
+    end = std::unique(samples.begin(), end);
+    auto colorAt = [&](float position) {
+        auto color = gradientAt(stops, position, curve);
+        return noteVertexColor(unpackC(color.color), color.alpha / 255.f);
+    };
+    for (auto it = samples.begin() + 1; it != end; ++it) {
+        float left = x + w * it[-1], right = x + w * *it;
+        noteQuad(draw, {right, y}, {right, y + h}, {left, y + h}, {left, y}, colorAt(*it), colorAt(it[-1]));
     }
 }
 
@@ -2387,7 +2444,38 @@ class VisualColorPopup : public geode::Popup {
     std::array<float, 3> m_hsv{};
     CCDrawNode* m_paint = nullptr;
     CCLabelBMFont* m_opacity = nullptr;
+    std::array<CCLabelBMFont*, 3> m_stopLabels{};
+    std::optional<GradientStop> m_hiddenMiddle;
     std::function<void(GradientStops const&)> m_apply;
+
+    char const* stopLabel(int slot) const {
+        if (slot == 0) return "Bottom";
+        if (slot == m_colors.count - 1) return "Fading tip";
+        return "Middle color";
+    }
+
+    void selectStop(int slot) {
+        m_stop = slot;
+        m_hsv = hsvFromColor(m_colors[slot].color);
+    }
+
+    void setColorCount(int count) {
+        if (m_colors.count == count) return;
+        if (count == 3) {
+            float position = (stopPosition(m_colors, 0) + stopPosition(m_colors, 1)) * 0.5f;
+            auto middle = gradientAt(m_colors, position, kNoteOpacityCurve);
+            middle.position = position;
+            m_colors[2] = m_colors[1];
+            m_colors[1] = m_hiddenMiddle.value_or(middle);
+        } else {
+            m_hiddenMiddle = m_colors[1];
+            m_colors[1] = m_colors[2];
+        }
+        m_colors.count = count;
+        normalizeGradient(m_colors);
+        selectStop(count == 3 ? 1 : std::min(m_stop, 1));
+        refresh();
+    }
     std::function<void()> m_dismiss;
 
     void refresh() {
@@ -2399,12 +2487,25 @@ class VisualColorPopup : public geode::Popup {
             dnStrokeA(m_paint, x - radius, y - radius, x + radius, y + radius, radius, mark, 0.85f, 1.f, 5);
         };
         if (m_gradient) {
-            drawRamp(m_paint, m_colors, 22.f, 181.f, 176.f, 12.f, kNoteOpacityCurve);
             for (int i = 0; i < 2; ++i) {
-                float x = i == 0 ? 22.f : 117.f;
-                dnRound(m_paint, x, 171.f, x + 81.f, 180.f, 3.f,
+                float x = 22.f + i * 90.f;
+                dnRound(m_paint, x, 201.f, x + 86.f, 219.f, 4.f,
+                        m_colors.count == i + 2 ? lerpC(field, mark, 0.27f) : field);
+            }
+            drawRamp(m_paint, m_colors, 22.f, 181.f, 176.f, 12.f, kNoteOpacityCurve);
+            float slotWidth = 176.f / m_colors.count;
+            for (int i = 0; i < 3; ++i) {
+                if (m_stopLabels[i]) m_stopLabels[i]->setVisible(i < m_colors.count);
+                if (i >= m_colors.count) continue;
+                float x = 22.f + i * slotWidth;
+                dnRound(m_paint, x, 171.f, x + slotWidth - 2.f, 180.f, 3.f,
                         i == m_stop ? lerpC(field, mark, 0.18f) : field);
                 cursor(22.f + 176.f * stopPosition(m_colors, i), 187.f, i == m_stop ? 4.5f : 3.f);
+                if (auto label = m_stopLabels[i]) {
+                    label->setString(uiText(stopLabel(i)).c_str());
+                    label->setScale(std::min(0.22f, (slotWidth - 5.f) / std::max(1.f, label->getContentSize().width)));
+                    label->setPosition({x + (slotWidth - 2.f) / 2.f, 175.5f});
+                }
             }
         } else {
             dnRound(m_paint, 22.f, 180.f, 198.f, 193.f, 3.f, unpackC(m_colors[0].color), 1.f);
@@ -2426,7 +2527,7 @@ class VisualColorPopup : public geode::Popup {
             auto color = m_colors[m_stop].color;
             drawRamp(m_paint, {{{color, 0}, {color, 255}}}, 22.f, 42.f, 176.f, 9.f);
             cursor(22.f + 176.f * m_colors[m_stop].alpha / 255.f, 46.5f, 3.7f);
-            auto percent = uiText(m_stop == 0 ? "Bottom" : "Fading tip") + "  " + std::to_string(std::lround(m_colors[m_stop].alpha * 100.f / 255.f)) + "%";
+            auto percent = uiText(stopLabel(m_stop)) + "  " + std::to_string(std::lround(m_colors[m_stop].alpha * 100.f / 255.f)) + "%";
             if (m_opacity) m_opacity->setString(percent.c_str());
         }
         dnRound(m_paint, 131.f, 10.f, 199.f, 32.f, 4.f, field, 1.f);
@@ -2460,11 +2561,12 @@ public:
     static VisualColorPopup* create(GradientStops stops, bool gradient, bool light,
         std::function<void(GradientStops const&)> apply, std::function<void()> dismiss) {
         auto popup = new VisualColorPopup;
-        if (!popup->Popup::init(220.f, 226.f)) {
+        if (!popup->Popup::init(220.f, gradient ? 251.f : 226.f)) {
             delete popup;
             return nullptr;
         }
         popup->m_colors = stops;
+        normalizeGradient(popup->m_colors);
         popup->m_gradient = gradient;
         popup->setTouchEnabled(true);
         popup->setMouseEnabled(gradient);
@@ -2474,19 +2576,24 @@ public:
         popup->m_dismiss = std::move(dismiss);
         popup->m_paint = CCDrawNode::create();
         auto background = CCDrawNode::create();
-        dnRound(background, 8.f, 5.f, 212.f, 220.f, 9.f,
+        dnRound(background, 8.f, 5.f, 212.f, gradient ? 245.f : 220.f, 9.f,
                 light ? ccColor3B{230, 235, 241} : ccColor3B{27, 33, 40}, 1.f, 6);
         popup->m_mainLayer->addChild(background, 1);
         popup->m_mainLayer->addChild(popup->m_paint, 2);
         auto text = light ? ccColor3B{41, 48, 55} : kWhite;
         auto title = mkLabel(popup->m_mainLayer, gradient ? "Note gradient" : "Choose color",
-                            0.40f, text, {110.f, 208.f}, 0.5f);
+                            0.40f, text, {110.f, gradient ? 232.f : 208.f}, 0.5f);
         if (title) title->setZOrder(3);
         if (gradient) {
-            auto start = mkLabel(popup->m_mainLayer, "Bottom", 0.23f, text, {22.f, 175.f}, 0.f);
-            auto tip = mkLabel(popup->m_mainLayer, "Fading tip", 0.23f, text, {198.f, 175.f}, 1.f);
-            if (start) start->setZOrder(3);
-            if (tip) tip->setZOrder(3);
+            for (int i = 0; i < 2; ++i) {
+                auto label = mkLabel(popup->m_mainLayer, i == 0 ? "Two colors" : "Three colors",
+                                     0.25f, text, {65.f + i * 90.f, 210.f}, 0.5f);
+                if (label) label->setZOrder(3);
+            }
+            for (auto& label : popup->m_stopLabels) {
+                label = mkLabel(popup->m_mainLayer, "", 0.22f, text, {0.f, 0.f}, 0.5f);
+                if (label) label->setZOrder(3);
+            }
             popup->m_opacity = mkLabel(popup->m_mainLayer, "", 0.29f, text, {24.f, 21.f}, 0.f);
             if (popup->m_opacity) popup->m_opacity->setZOrder(3);
         }
@@ -2501,17 +2608,24 @@ public:
 
     bool ccTouchBegan(CCTouch* touch, CCEvent* event) override {
         auto p = m_mainLayer->convertTouchToNodeSpace(touch);
+        if (m_gradient && CCRect(22.f, 201.f, 176.f, 18.f).containsPoint(p)) {
+            setColorCount(p.x < 110.f ? 2 : 3);
+            return true;
+        }
         if (m_gradient && CCRect(15.f, 180.f, 190.f, 17.f).containsPoint(p)) {
             float t = (p.x - 22.f) / 176.f;
-            m_stop = std::abs(t - stopPosition(m_colors, 0)) <= std::abs(t - stopPosition(m_colors, 1)) ? 0 : 1;
-            m_hsv = hsvFromColor(m_colors[m_stop].color);
+            int nearest = 0;
+            for (int i = 1; i < m_colors.count; ++i) {
+                if (std::abs(t - stopPosition(m_colors, i)) < std::abs(t - stopPosition(m_colors, nearest))) nearest = i;
+            }
+            selectStop(nearest);
             m_drag = 5;
             refresh();
             return true;
         }
         if (m_gradient && CCRect(16.f, 171.f, 188.f, 9.f).containsPoint(p)) {
-            m_stop = p.x < 110.f ? 0 : 1;
-            m_hsv = hsvFromColor(m_colors[m_stop].color);
+            float slot = (p.x - 22.f) / 176.f * m_colors.count;
+            selectStop(std::clamp(static_cast<int>(slot), 0, m_colors.count - 1));
             refresh();
             return true;
         }
@@ -2946,11 +3060,16 @@ protected:
         m_light = Mod::get()->getSettingValue<std::string>("editor-theme") != "Dark";
         this->setTouchEnabled(true);
         this->setMouseEnabled(true);
-        addEventListener(geode::KeyboardInputEvent(KEY_Z), [this](geode::KeyboardInputData& event) {
+        addEventListener(geode::KeyboardInputEvent(), [this](geode::KeyboardInputData& event) {
             using Action = geode::KeyboardInputData::Action;
             if (m_modal || m_closing || event.modifiers.value != geode::KeyboardModifier::Control ||
-                event.action == Action::Release) return geode::ListenerResult::Propagate;
-            if (event.action == Action::Press && !m_dragMode) undoEdit();
+                event.action == Action::Release || (event.key != KEY_Z && event.key != KEY_C && event.key != KEY_V))
+                return geode::ListenerResult::Propagate;
+            if (event.action == Action::Press && !m_dragMode) {
+                if (event.key == KEY_Z) undoEdit();
+                if (event.key == KEY_C) copyKeys();
+                if (event.key == KEY_V) trackEdit([&] { pasteKeys(); });
+            }
             return geode::ListenerResult::Stop;
         }, -1100);
 
@@ -3288,6 +3407,81 @@ protected:
         this->redrawMapBar();
         this->redrawCanvas();
         this->rebuildInspector();
+    }
+
+    void copyKeys() {
+        std::vector<KeyDef> selected;
+        if (!m_group.empty()) {
+            for (auto const& item : m_group) {
+                if (item.kind != CanvasItemKind::Key) continue;
+                if (auto key = keyById(item.id)) selected.push_back(*key);
+            }
+        } else if (!m_photoSelected && !(m_tab == 2 && m_statTab > 0)) {
+            if (auto key = keyById(m_sel)) selected.push_back(*key);
+        }
+        if (selected.empty()) {
+            setStatus("Select a key to copy.");
+            return;
+        }
+        g_keyClipboard = std::move(selected);
+        g_clipboardPastes = 0;
+        m_pendingRebuild = true;
+        setStatus(uiText("Copied keys ") + std::to_string(g_keyClipboard.size()));
+    }
+
+    void pasteKeys() {
+        if (g_keyClipboard.empty()) {
+            setStatus("Copy a key first.");
+            return;
+        }
+        float minX = g_keyClipboard.front().x, maxX = minX;
+        float minY = g_keyClipboard.front().y, maxY = minY;
+        for (auto const& key : g_keyClipboard) {
+            minX = std::min(minX, key.x);
+            maxX = std::max(maxX, key.x);
+            minY = std::min(minY, key.y);
+            maxY = std::max(maxY, key.y);
+        }
+        float shift = 12.f * (1.f + std::min(g_clipboardPastes, 80u));
+        auto offset = [shift](float min, float max, float limit, float direction) {
+            float room = direction > 0.f ? limit - max : limit + min;
+            float opposite = direction > 0.f ? limit + min : limit - max;
+            return room >= shift || room >= opposite
+                ? direction * std::clamp(room, 0.f, shift)
+                : -direction * std::clamp(opposite, 0.f, shift);
+        };
+        float dx = offset(minX, maxX, 500.f, 1.f);
+        float dy = offset(minY, maxY, 300.f, -1.f);
+        int firstId = g_nextId;
+        for (auto key : g_keyClipboard) {
+            key.id = g_nextId++;
+            key.x += dx;
+            key.y += dy;
+            saveKey(key);
+            g_keys.push_back(std::move(key));
+        }
+        ++g_clipboardPastes;
+        saveKeyList();
+        m_sel = firstId;
+        m_tab = 0;
+        m_statTab = 0;
+        m_photoSelected = false;
+        m_group.clear();
+        m_scroll = 0.f;
+        m_viewer->applyLook();
+        if (g_keyClipboard.size() > 1) {
+            for (auto const& item : canvasItems()) {
+                if (item.kind == CanvasItemKind::Key && item.id >= firstId && item.id < g_nextId) m_group.push_back(item);
+            }
+            if (m_group.size() == 1) {
+                m_sel = m_group.front().id;
+                m_group.clear();
+            }
+        }
+        redrawCanvas();
+        redrawChrome();
+        m_pendingRebuild = true;
+        setStatus(uiText("Pasted keys ") + std::to_string(g_keyClipboard.size()));
     }
 
     void addKey() {
@@ -4297,12 +4491,7 @@ protected:
                 auto current = keyById(id);
                 if (!current) return;
                 current->style["note-gradient-enabled"] = 1;
-                current->style["note-gradient-bottom"] = changed[0].color;
-                current->style["note-gradient-top"] = changed[1].color;
-                current->style["gradient-bottom-alpha"] = changed[0].alpha;
-                current->style["gradient-top-alpha"] = changed[1].alpha;
-                current->style["gradient-bottom-position"] = stopPosition(changed, 0) * 100.f;
-                current->style["gradient-top-position"] = stopPosition(changed, 1) * 100.f;
+                storeNoteGradient(current->style, changed);
                 commitKey(id);
             });
         };
@@ -4629,10 +4818,14 @@ protected:
         rowCycle("Select key", names,
             [id, ids]() { return int(std::find(ids.begin(), ids.end(), id) - ids.begin()); },
             [this, ids](int index) {
+                m_group.clear();
+                m_photoSelected = false;
                 m_sel = ids[index];
                 redrawCanvas();
                 m_pendingRebuild = true;
             });
+        rowButton("Copy keys", uiField(), [this] { copyKeys(); });
+        if (!g_keyClipboard.empty()) rowButton("Paste keys", uiField(), [this] { pasteKeys(); });
         std::vector<std::string> maps(kMapNames, kMapNames + 6);
         rowCycle("Input", maps,
             [id]() { auto k = keyById(id); return k ? k->map : 0; },

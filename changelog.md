@@ -1,3 +1,9 @@
+# v1.0.8
+
+- Copy and paste selected keys from the keyboard or the editor.
+- Add independently editable third gradient stops and a Glacier Cyan preset based on the reference.
+- Render one note per hold and let it leave the track without generating another segment.
+
 # v1.0.7
 
 - Select multiple canvas items with a drag rectangle and move them together.
