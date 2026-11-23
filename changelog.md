@@ -1,3 +1,10 @@
+# v1.0.6
+
+- Undo recent editor changes with Ctrl+Z.
+- Feather note glow in one continuous mesh and let held notes travel out of the track.
+- Select, drag, and resize the background photo directly on the canvas.
+- Add a setting to keep the Total value between levels.
+
 # v1.0.5
 
 - Render a continuous note gradient with vertex colors, and clip notes at the end of the track as they exit.

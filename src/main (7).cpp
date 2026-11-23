@@ -19,6 +19,9 @@
 #include <map>
 #include <functional>
 #include <string>
+#include <limits>
+#include <optional>
+#include <span>
 #include <vector>
 
 using namespace geode::prelude;
@@ -467,6 +470,7 @@ struct KeyDef {
     float borderW = 0.f;
     float radius = -1.f;         // %, -1 = 전체 설정 사용
     int label = 0;               // 0 = 자동, 그 외 kLabels 번호
+    bool operator==(KeyDef const&) const = default;
 };
 
 static char const* const kLabels[] = {
@@ -1056,24 +1060,34 @@ static float holdNoteLength(double start, double end, float speed, float scale, 
 
 // CCDrawNode batches the triangles. Use its allocator for capacity, then append
 // shared, individually colored vertices so no internal edge gets an AA fringe.
-static void noteQuad(CCDrawNode* draw, CCPoint a, CCPoint b, CCPoint c, CCPoint d, ccColor4B low, ccColor4B high) {
+static void appendNotePolygon(CCDrawNode* draw, std::span<ccV2F_C4B_T2F const> points) {
+    if (points.size() < 3) return;
     auto previous = draw->m_nBufferCount;
-    if (static_cast<unsigned>(previous + 6) > draw->m_uBufferCapacity) {
-        CCPoint reserve[] = {{0.f, 0.f}, {1.f, 0.f}, {1.f, 1.f}, {0.f, 1.f}};
+    auto count = static_cast<unsigned>((points.size() - 2) * 3);
+    if (static_cast<unsigned>(previous) + count > draw->m_uBufferCapacity) {
+        // Let Cocos grow its own buffer without mixing allocators.
+        CCPoint reserve[] = {{0.f, 0.f}, {1.f, 0.f}, {2.f, 0.5f}, {2.f, 1.5f}, {1.f, 2.f}, {0.f, 2.f}};
         constexpr ccColor4F opaque{1.f, 1.f, 1.f, 1.f};
-        draw->drawPolygon(reserve, 4, opaque, 0.f, opaque);
+        draw->drawPolygon(reserve, 6, opaque, 0.f, opaque);
         draw->m_nBufferCount = previous;
-        if (static_cast<unsigned>(previous + 6) > draw->m_uBufferCapacity) return;
+        if (static_cast<unsigned>(previous) + count > draw->m_uBufferCapacity) return;
     }
-    auto vertex = [](CCPoint point, ccColor4B color) -> ccV2F_C4B_T2F {
-        return {{point.x, point.y}, color, {0.f, 0.f}};
-    };
-    auto va = vertex(a, low), vb = vertex(b, low), vc = vertex(c, high), vd = vertex(d, high);
     auto out = draw->m_pBuffer + previous;
-    out[0] = va; out[1] = vb; out[2] = vc;
-    out[3] = va; out[4] = vc; out[5] = vd;
-    draw->m_nBufferCount = previous + 6;
+    for (size_t i = 1; i + 1 < points.size(); ++i) {
+        *out++ = points[0];
+        *out++ = points[i];
+        *out++ = points[i + 1];
+    }
+    draw->m_nBufferCount = previous + count;
     draw->m_bDirty = true;
+}
+
+static void noteQuad(CCDrawNode* draw, CCPoint a, CCPoint b, CCPoint c, CCPoint d, ccColor4B low, ccColor4B high) {
+    std::array<ccV2F_C4B_T2F, 4> points{{
+        {{a.x, a.y}, low, {0.f, 0.f}}, {{b.x, b.y}, low, {0.f, 0.f}},
+        {{c.x, c.y}, high, {0.f, 0.f}}, {{d.x, d.y}, high, {0.f, 0.f}}
+    }};
+    appendNotePolygon(draw, points);
 }
 
 static ccColor4B noteVertexColor(ccColor3B color, float opacity) {
@@ -1089,6 +1103,79 @@ static float visibleNoteLength(float distance, float length, float trackHeight) 
 static float noteFillFade(Look const& look, float position, float trackHeight) {
     float progress = std::max(0.f, (position / trackHeight - look.fadeStart) / (1.f - look.fadeStart));
     return timelineFade(progress, look.noteFade, look.gradNotes);
+}
+
+static void paintNoteGlow(CCDrawNode* glow, Look const& look, ccColor3B color, float opacity,
+                          float x, float origin, float w, float length, float radius,
+                          float position, float trackHeight) {
+    struct Vertex { CCPoint point; float alpha; };
+    constexpr size_t count = 28;
+    // Unrolled straight sides keep the travel fade smooth even on long holds.
+    auto contour = [&](float pad, float alpha) {
+        std::array<Vertex, count> result;
+        float r = std::max(0.f, radius + pad);
+        float left = x - pad + r, right = x + w + pad - r;
+        float bottom = -pad + r, top = length + pad - r;
+        size_t i = 0;
+        auto arc = [&](float cx, float cy, float start) {
+            for (int step = 0; step <= 4; ++step) {
+                float angle = start + step * kPi / 8.f;
+                result[i++] = {{cx + r * std::cos(angle), cy + r * std::sin(angle)}, alpha};
+            }
+        };
+        auto side = [&](float sx, float low, float high) {
+            for (int step = 1; step <= 4; ++step)
+                result[i++] = {{sx, low + (high - low) * step / 5.f}, alpha};
+        };
+        arc(left, bottom, kPi);
+        arc(right, bottom, 1.5f * kPi);
+        side(x + w + pad, bottom, top);
+        arc(right, top, 0.f);
+        arc(left, top, 0.5f * kPi);
+        side(x - pad, top, bottom);
+        return result;
+    };
+    auto clip = [](std::span<Vertex const> in, std::array<Vertex, 6>& out, float limit, bool keepAbove) {
+        size_t count = 0;
+        if (in.empty()) return count;
+        auto inside = [&](Vertex v) { return keepAbove ? v.point.y >= limit : v.point.y <= limit; };
+        auto previous = in.back();
+        for (auto current : in) {
+            bool a = inside(previous), b = inside(current);
+            if (a != b) {
+                float t = (limit - previous.point.y) / (current.point.y - previous.point.y);
+                out[count++] = {{previous.point.x + (current.point.x - previous.point.x) * t, limit},
+                                previous.alpha + (current.alpha - previous.alpha) * t};
+            }
+            if (b) out[count++] = current;
+            previous = current;
+        }
+        return count;
+    };
+    float spread = 9.f * look.glowSize;
+    float direction = look.reverseFlow ? -1.f : 1.f;
+    float power = look.glowStrength * look.noteOpacity * opacity * 0.46f;
+    auto inner = contour(-std::min({1.25f, w / 4.f, length / 4.f}), 0.f);
+    for (int ring = 0; ring <= 6; ++ring) {
+        float t = ring / 6.f;
+        float feather = (1.f - t) * (1.f - t);
+        auto outer = contour(spread * t, feather);
+        for (size_t i = 0; i < count; ++i) {
+            size_t next = (i + 1) % count;
+            std::array<Vertex, 4> patch{inner[i], outer[i], outer[next], inner[next]};
+            std::array<Vertex, 6> first, clipped;
+            size_t size = clip(patch, first, -position, true);
+            size = clip(std::span(first).first(size), clipped, trackHeight - position, false);
+            std::array<ccV2F_C4B_T2F, 6> vertices;
+            for (size_t j = 0; j < size; ++j) {
+                auto v = clipped[look.reverseFlow ? size - 1 - j : j];
+                float alpha = power * v.alpha * noteFillFade(look, position + v.point.y, trackHeight);
+                vertices[j] = {{v.point.x, origin + direction * v.point.y}, noteVertexColor(color, alpha), {0.f, 0.f}};
+            }
+            appendNotePolygon(glow, std::span(vertices).first(size));
+        }
+        inner = outer;
+    }
 }
 
 static void paintNote(CCDrawNode* draw, CCDrawNode* glow, Look const& look, float x, float origin,
@@ -1171,24 +1258,9 @@ static void paintNote(CCDrawNode* draw, CCDrawNode* glow, Look const& look, floa
         });
     }
 
-    if (!look.noteGlow || look.glowStrength <= 0.f) return;
+    if (!look.noteGlow || look.glowStrength <= 0.f || colors[0].alpha == 0) return;
     auto color = look.glowCustom ? look.glowColor : unpackC(colors[0].color);
-    float spread = 9.f * look.glowSize;
-    float alpha = look.glowStrength * look.noteOpacity * (colors[0].alpha / 255.f) * 0.13f;
-    for (int layer = 3; layer > 0; --layer) {
-        float pad = spread * layer / 3.f;
-        float low = std::max(-pad, -position), high = std::min(length + pad, trackHeight - position);
-        rows.assign({low, high});
-        addCorners(rows, -pad, length + pad, radius + pad);
-        sortRows(rows, low, high);
-        interval(low, high, [&](float a, float b) {
-            float ia = cornerInset(a + pad, length + 2.f * pad, radius + pad);
-            float ib = cornerInset(b + pad, length + 2.f * pad, radius + pad);
-            auto ca = noteVertexColor(color, alpha * noteFillFade(look, position + a, trackHeight));
-            auto cb = noteVertexColor(color, alpha * noteFillFade(look, position + b, trackHeight));
-            quad(glow, x - pad + ia, x + w + pad - ia, x - pad + ib, x + w + pad - ib, a, b, ca, cb);
-        });
-    }
+    paintNoteGlow(glow, look, color, colors[0].alpha / 255.f, x, origin, w, length, radius, position, trackHeight);
 }
 
 struct Note {
@@ -1196,6 +1268,19 @@ struct Note {
     double start = 0.0;
     double end = -1.0; // 아직 누르는 중이면 -1
 };
+
+struct NoteSpan { float distance; float length; };
+
+static NoteSpan noteSpan(Note const& note, Look const& look, double now, float trackHeight) {
+    float speed = look.noteSpeed;
+    // Stop extending a held bar once it fills the track, then let its tail travel out.
+    double maxFeed = note.start + trackHeight / (speed * look.holdLengthScale);
+    double tailStart = std::min(maxFeed, note.end < 0. ? now : note.end);
+    float length = holdNoteLength(note.start, tailStart, speed, look.holdLengthScale, trackHeight);
+    if (look.fixedShortNotes && note.end >= 0. && note.end - note.start <= look.shortNoteTime)
+        length = std::max(length, look.shortNoteLength);
+    return {static_cast<float>(std::max(0., now - tailStart) * speed), length};
+}
 
 // ---------------------------------------------------------------
 // 키 하나(타일 + 글로우 + 카운터 + 노트)
@@ -1498,27 +1583,14 @@ public:
             clearNotes();
             return;
         }
-        float sp = m_look.noteSpeed;
-
-        auto distance = [&](Note const& note) {
-            double release = note.end < 0 ? now : note.end;
-            return static_cast<float>((now - release) * sp);
-        };
-        auto length = [&](Note const& note) {
-            double release = note.end < 0 ? now : note.end;
-            float result = holdNoteLength(note.start, release, sp, m_look.holdLengthScale, H);
-            if (m_look.fixedShortNotes && note.end >= 0 && note.end - note.start <= m_look.shortNoteTime)
-                result = std::max(result, m_look.shortNoteLength);
-            return result;
-        };
-        std::erase_if(m_notes, [&](Note const& note) { return distance(note) >= H; });
+        std::erase_if(m_notes, [&](Note const& note) { return noteSpan(note, m_look, now, H).distance >= H; });
 
         float nw = std::max(2.f, m_look.noteWidth * m_w);
         float x = (m_w - nw) / 2.f;
         for (auto const& note : m_notes) {
-            float position = distance(note);
-            float y = m_look.reverseFlow ? -m_look.noteBaseGap - position : m_noteStart + position;
-            paintNote(m_noteFill, m_noteGlow, m_look, x, y, nw, length(note), position, H);
+            auto span = noteSpan(note, m_look, now, H);
+            float y = m_look.reverseFlow ? -m_look.noteBaseGap - span.distance : m_noteStart + span.distance;
+            paintNote(m_noteFill, m_noteGlow, m_look, x, y, nw, span.length, span.distance, H);
         }
     }
 
@@ -1593,12 +1665,16 @@ static Look statLook(Look const& base, int metric) {
     return result;
 }
 
-struct BackgroundPhoto {
-    Ref<CCTexture2D> texture;
+struct BackgroundPhotoState {
     std::string file;
-    bool loaded = false;
     bool visible = true;
     float x = 0.f, y = 0.f, width = 150.f, height = 0.f, opacity = 100.f;
+    bool operator==(BackgroundPhotoState const&) const = default;
+};
+
+struct BackgroundPhoto : BackgroundPhotoState {
+    Ref<CCTexture2D> texture;
+    bool loaded = false;
 };
 
 static BackgroundPhoto g_photo;
@@ -1628,6 +1704,22 @@ static CCTexture2D* decodePhoto(ByteVector& bytes) {
     return texture;
 }
 
+static bool isPhotoFile(std::string_view file) {
+    constexpr std::string_view prefix = "background-";
+    if (!file.starts_with(prefix)) return false;
+    file.remove_prefix(prefix.size());
+    return !file.empty() && file.size() <= 10 &&
+        std::all_of(file.begin(), file.end(), [](char c) { return c >= '0' && c <= '9'; });
+}
+
+static Ref<CCTexture2D> loadPhotoTexture(std::string const& file) {
+    if (!isPhotoFile(file)) return {};
+    std::error_code ec;
+    if (std::filesystem::file_size(photoPath(file), ec) > kMaxPhotoBytes || ec) return {};
+    auto bytes = geode::utils::file::readBinary(photoPath(file));
+    return Ref<CCTexture2D>(bytes.isOk() ? decodePhoto(bytes.unwrap()) : nullptr);
+}
+
 static void loadBackgroundPhoto() {
     if (g_photo.loaded) return;
     g_photo.loaded = true;
@@ -1639,14 +1731,8 @@ static void loadBackgroundPhoto() {
     g_photo.width = static_cast<float>(std::clamp(mod->getSavedValue<double>("photo-width", 150.), 10., 1000.));
     g_photo.height = static_cast<float>(std::clamp(mod->getSavedValue<double>("photo-height", 0.), 0., 1000.));
     g_photo.opacity = static_cast<float>(std::clamp(mod->getSavedValue<double>("photo-opacity", 100.), 0., 100.));
-    if (g_photo.file != "background-0" && g_photo.file != "background-1") {
-        g_photo.file.clear();
-        return;
-    }
-    std::error_code ec;
-    if (std::filesystem::file_size(photoPath(g_photo.file), ec) > kMaxPhotoBytes || ec) return;
-    auto bytes = geode::utils::file::readBinary(photoPath(g_photo.file));
-    if (bytes.isOk()) g_photo.texture = Ref<CCTexture2D>(decodePhoto(bytes.unwrap()));
+    if (!isPhotoFile(g_photo.file)) g_photo.file.clear();
+    g_photo.texture = loadPhotoTexture(g_photo.file);
 }
 
 static void saveBackgroundPhoto() {
@@ -1712,6 +1798,9 @@ protected:
         if (!CCLayer::init()) return false;
         m_platformer = platformer;
         m_twoPlayer = twoPlayer;
+        if (!Mod::get()->getSettingValue<bool>("reset-total-on-exit"))
+            m_total = static_cast<int>(std::clamp<int64_t>(Mod::get()->getSavedValue<int64_t>("cumulative-total", 0),
+                                                           0, std::numeric_limits<int>::max()));
         this->setTouchEnabled(true);
 
         m_frame = CCDrawNode::create();
@@ -2001,7 +2090,7 @@ public:
             lane->input(source, true, t, m_look.viewerVisible && lane->isVisible(), m_look.viewerVisible);
         }
         m_hits.push_back(t);
-        ++m_total;
+        if (m_total < std::numeric_limits<int>::max()) ++m_total;
     }
 
     void onKeyboard(int code, bool down) {
@@ -2018,7 +2107,7 @@ public:
             }
             if (used) {
                 m_hits.push_back(t);
-                ++m_total;
+                if (m_total < std::numeric_limits<int>::max()) ++m_total;
             }
         } else if (m_heldKeys.erase(code)) {
             for (auto& r : m_lanes)
@@ -2030,6 +2119,16 @@ public:
         m_heldSources = 0;
         m_heldKeys.clear();
         for (auto& r : m_lanes) r.lane->resetInput();
+    }
+
+    void onExit() override {
+        auto mod = Mod::get();
+        int64_t total = mod->getSettingValue<bool>("reset-total-on-exit") ? 0 : m_total;
+        if (total != mod->getSavedValue<int64_t>("cumulative-total", 0)) {
+            mod->setSavedValue<int64_t>("cumulative-total", total);
+            (void)mod->saveData();
+        }
+        CCLayer::onExit();
     }
 
     void onRestart() {
@@ -2598,6 +2697,25 @@ public:
     void ccTouchCancelled(CCTouch*, CCEvent*) override { m_action = 0; }
 };
 
+static SetDef const kEditorGlobalSettings[] = {
+    {"show-viewer", SetType::Bool}, {"reset-on-restart", SetType::Bool}, {"reset-total-on-exit", SetType::Bool},
+    {"box-size", SetType::Num}, {"jump-width", SetType::Num}, {"box-gap", SetType::Num},
+    {"pos-x", SetType::Num}, {"pos-y", SetType::Num}
+};
+
+struct EditorState {
+    std::vector<KeyDef> keys;
+    std::array<StyleValues, StatCount> stats;
+    std::array<std::string, StatCount> statNames;
+    BackgroundPhotoState photo;
+    StyleValues settings;
+    std::vector<std::pair<std::string, std::string>> presets;
+    std::map<int, std::string> priorPreset;
+    std::string language;
+    std::string theme;
+    bool operator==(EditorState const&) const = default;
+};
+
 class KVEditor : public CCLayer {
 protected:
     KeyViewer* m_viewer = nullptr;
@@ -2615,16 +2733,22 @@ protected:
     bool m_closing = false;
     bool m_reloadLanguage = false;
     bool m_mapMode = false;
+    bool m_photoSelected = false;
+    bool m_dragPhoto = false;
     bool m_pendingRebuild = false;
     bool m_modal = false;
     bool m_light = true;
     int m_dragStat = -1;
     int m_statTab = 0;
     std::map<int, std::string> m_undoPreset;
+    std::deque<EditorState> m_undo;
+    std::optional<EditorState> m_beforeDrag;
+    std::set<std::string> m_photoFiles;
 
     CCDrawNode* m_back = nullptr;
     CCDrawNode* m_chrome = nullptr;
     CCDrawNode* m_canvas = nullptr;
+    CCDrawNode* m_photoFrame = nullptr;
     CCClippingNode* m_canvasClip = nullptr;
     CCSprite* m_photoPreview = nullptr;
     CCDrawNode* m_bar = nullptr;
@@ -2671,12 +2795,117 @@ protected:
     ccColor3B uiLine() const { return m_light ? ccColor3B{170, 190, 212} : ccColor3B{64, 85, 111}; }
     ccColor3B uiPanel() const { return m_light ? ccColor3B{248, 251, 255} : ccColor3B{23, 35, 53}; }
 
+    EditorState captureState() const {
+        auto mod = Mod::get();
+        EditorState state{g_keys, g_statSettings, g_statNames, g_photo, readPresetDefaults(), {}, m_undoPreset,
+                          mod->getSettingValue<std::string>("language"), mod->getSettingValue<std::string>("editor-theme")};
+        for (auto const& item : kEditorGlobalSettings) {
+            state.settings[item.key] = item.type == SetType::Bool ?
+                static_cast<double>(mod->getSettingValue<bool>(item.key)) : mod->getSettingValue<double>(item.key);
+        }
+        for (int i = 0, n = presetCount(); i < n; ++i) state.presets.emplace_back(presetName(i), presetData(i));
+        return state;
+    }
+
+    void cleanPhotoHistory(bool keepUndo) {
+        for (auto it = m_photoFiles.begin(); it != m_photoFiles.end();) {
+            bool keep = *it == g_photo.file || (keepUndo &&
+                std::any_of(m_undo.begin(), m_undo.end(), [&](EditorState const& state) { return state.photo.file == *it; }));
+            if (keep) {
+                ++it;
+            } else {
+                std::error_code ec;
+                std::filesystem::remove(photoPath(*it), ec);
+                it = m_photoFiles.erase(it);
+            }
+        }
+    }
+
+    void recordEdit(EditorState before) {
+        if (before == captureState()) return;
+        m_undo.push_back(std::move(before));
+        if (m_undo.size() > 48) m_undo.pop_front();
+    }
+
+    template <class Action>
+    void trackEdit(Action action) {
+        auto before = captureState();
+        action();
+        recordEdit(std::move(before));
+    }
+
+    void undoEdit() {
+        if (m_undo.empty()) {
+            setStatus("No edit to undo.");
+            return;
+        }
+        auto current = captureState();
+        auto state = std::move(m_undo.back());
+        m_undo.pop_back();
+        auto mod = Mod::get();
+        auto restoreSetting = [&](SetDef const& item) {
+            auto value = state.settings.at(item.key);
+            if (value == current.settings.at(item.key)) return;
+            switch (item.type) {
+                case SetType::Bool: mod->setSettingValue<bool>(item.key, value != 0.); break;
+                case SetType::Num: mod->setSettingValue<double>(item.key, value); break;
+                case SetType::Int: mod->setSettingValue<int64_t>(item.key, static_cast<int64_t>(value)); break;
+                case SetType::Color: mod->setSettingValue<ccColor3B>(item.key, unpackC(static_cast<int>(value))); break;
+                case SetType::Str: mod->setSettingValue<std::string>(item.key, value == 3. ? "Both" : value == 2. ? "Tile" :
+                                                                          value == 1. ? "Notes" : "Off"); break;
+            }
+        };
+        for (auto const& item : kSetDefs) restoreSetting(item);
+        for (auto const& item : kEditorGlobalSettings) restoreSetting(item);
+        if (state.keys != current.keys) {
+            m_viewer->resetInput();
+            g_keys = std::move(state.keys);
+            for (auto const& key : g_keys) saveKey(key);
+            saveKeyList();
+        }
+        if (state.stats != current.stats || state.statNames != current.statNames) {
+            g_statSettings = std::move(state.stats);
+            g_statNames = std::move(state.statNames);
+            for (int i = 0; i < StatCount; ++i) saveStat(i);
+        }
+        if (state.presets != current.presets) {
+            for (size_t i = 0; i < state.presets.size(); ++i) {
+                auto const& [name, data] = state.presets[i];
+                mod->setSavedValue<std::string>("pr_" + std::to_string(i) + "_name", name);
+                presetSetData(static_cast<int>(i), data);
+            }
+            mod->setSavedValue<int64_t>("pr_count", static_cast<int64_t>(state.presets.size()));
+        }
+        if (state.photo != current.photo) {
+            if (state.photo.file != g_photo.file) g_photo.texture = loadPhotoTexture(state.photo.file);
+            static_cast<BackgroundPhotoState&>(g_photo) = std::move(state.photo);
+            saveBackgroundPhoto();
+        }
+        m_undoPreset = std::move(state.priorPreset);
+        if (state.language != current.language) mod->setSettingValue<std::string>("language", state.language);
+        if (state.theme != current.theme) mod->setSettingValue<std::string>("editor-theme", state.theme);
+        m_reloadLanguage = state.language != current.language || state.theme != current.theme;
+        refreshAll(true);
+        redrawMapBar();
+        m_pendingRebuild = true;
+        auto saved = mod->saveData();
+        if (saved.isOk()) cleanPhotoHistory(true);
+        setStatus(saved.isOk() ? "Undid last edit." : "Could not save the undo.");
+    }
+
     bool init(KeyViewer* viewer) {
         if (!CCLayer::init()) return false;
         m_viewer = viewer;
         m_light = Mod::get()->getSettingValue<std::string>("editor-theme") != "Dark";
         this->setTouchEnabled(true);
         this->setMouseEnabled(true);
+        addEventListener(geode::KeyboardInputEvent(KEY_Z), [this](geode::KeyboardInputData& event) {
+            using Action = geode::KeyboardInputData::Action;
+            if (m_modal || m_closing || event.modifiers.value != geode::KeyboardModifier::Control ||
+                event.action == Action::Release) return geode::ListenerResult::Propagate;
+            if (event.action == Action::Press && !m_dragMode) undoEdit();
+            return geode::ListenerResult::Stop;
+        }, -1100);
 
         auto win = CCDirector::get()->getWinSize();
         W = win.width;
@@ -2706,6 +2935,8 @@ protected:
         canvasClip->addChild(m_canvas, 0);
         m_canvasLabels = CCNode::create();
         canvasClip->addChild(m_canvasLabels, 1);
+        m_photoFrame = CCDrawNode::create();
+        canvasClip->addChild(m_photoFrame, 2);
         m_depthPreview = CCNode::create();
         m_canvasLabels->addChild(m_depthPreview);
         m_notePreview = CCNode::create();
@@ -2774,6 +3005,11 @@ protected:
                 c.r = CCRect(x0, tabY0, tw, inY1 - tabY0);
                 c.down = [this, i](CCPoint) {
                     m_tab = i;
+                    if (m_tab != 3 && m_photoSelected) {
+                        m_photoSelected = false;
+                        m_zoom = 1.f;
+                        m_pan = CCPoint{0.f, 0.f};
+                    }
                     m_scroll = 0.f;
                     this->redrawChrome();
                     this->rebuildInspector();
@@ -2998,6 +3234,8 @@ protected:
         m_mapLabels->setVisible(on);
         this->setPauseVisible(!on);
         m_dragMode = 0;
+        m_dragPhoto = false;
+        m_beforeDrag.reset();
         this->redrawBack();
         this->redrawChrome();
         this->redrawMapBar();
@@ -3080,6 +3318,7 @@ protected:
         d.map = k->map;
         d.label = k->label;
         d.text = k->text;
+        d.customName = k->customName;
         if (auto it = k->style.find("key-code"); it != k->style.end()) d.style.insert(*it);
         if (auto it = k->style.find("p2-only"); it != k->style.end()) d.style.insert(*it);
         d.x = k->x;
@@ -3154,8 +3393,10 @@ protected:
         auto popup = TimelineSettingsPopup::create(values, m_light, [this, id](auto const& updated) {
             auto key = keyById(id);
             if (!key) return;
-            for (size_t i = 0; i < kTimelineFields.size(); ++i) key->style[kTimelineFields[i].key] = updated[i];
-            commitKey(id);
+            trackEdit([&] {
+                for (size_t i = 0; i < kTimelineFields.size(); ++i) key->style[kTimelineFields[i].key] = updated[i];
+                commitKey(id);
+            });
             (void)Mod::get()->saveData();
         }, [this] {
             m_modal = false;
@@ -3167,7 +3408,7 @@ protected:
     }
 
     void changeZoom(float factor, bool reset = false) {
-        m_zoom = reset ? 1.f : std::clamp(m_zoom * factor, 0.35f, 4.f);
+        m_zoom = reset ? 1.f : std::clamp(m_zoom * factor, m_photoSelected ? 0.05f : 0.35f, 4.f);
         if (reset) m_pan = CCPoint{0.f, 0.f};
         redrawCanvas();
     }
@@ -3345,8 +3586,41 @@ protected:
         }
     }
 
+    CCRect photoRect() const {
+        auto center = m_viewer->photoCenter();
+        auto texture = g_photo.texture.data();
+        float height = g_photo.height;
+        if (height <= 0.f && texture) {
+            auto size = texture->getContentSizeInPixels();
+            height = size.width > 0.f ? size.height * g_photo.width / size.width : g_photo.width;
+        }
+        return {center.x + g_photo.x - g_photo.width / 2.f, center.y + g_photo.y - height / 2.f, g_photo.width, height};
+    }
+
+    void selectPhoto(bool fit = false) {
+        m_photoSelected = true;
+        m_statTab = 0;
+        m_tab = 3;
+        if (fit) {
+            updateFit();
+            auto box = photoRect();
+            float width = cvX1 - cvX0 - 42.f, height = cvY1 - cvY0 - 58.f;
+            m_zoom = std::min({1.f, width / (m_fit.sc * box.size.width), height / (m_fit.sc * box.size.height)});
+            m_zoom = std::max(m_zoom, 0.05f);
+            m_pan = CCPoint{0.f, 0.f};
+            auto v = view();
+            m_pan = CCPoint{(cvX0 + cvX1) / 2.f - v.ox - (box.origin.x + box.size.width / 2.f) * v.sc,
+                     (cvY0 + cvY1 + 14.f) / 2.f - v.oy - (box.origin.y + box.size.height / 2.f) * v.sc};
+        }
+        m_pendingRebuild = true;
+        redrawChrome();
+        redrawCanvas();
+        setStatus("Drag photo to move. Drag handles to resize.");
+    }
+
     void redrawCanvas() {
         m_canvas->clear();
+        m_photoFrame->clear();
         m_counterPreview->removeAllChildrenWithCleanup(true);
         m_notePreview->removeAllChildrenWithCleanup(true);
         m_depthPreview->removeAllChildrenWithCleanup(true);
@@ -3357,6 +3631,11 @@ protected:
         positionPhoto(m_canvasClip, m_photoPreview, {transform.ox + center.x * transform.sc,
                                                      transform.oy + center.y * transform.sc},
                       transform.sc, !m_mapMode || !m_viewer->isVisible());
+        if (m_photoSelected && g_photo.texture && g_photo.visible) {
+            auto box = photoRect();
+            float x = transform.ox + box.origin.x * transform.sc, y = transform.oy + box.origin.y * transform.sc;
+            drawSelection(m_photoFrame, x, y, x + box.size.width * transform.sc, y + box.size.height * transform.sc, 2.f);
+        }
         if (!m_mapMode || !m_viewer->isVisible()) {
             auto v = this->view();
             auto base = readLook();
@@ -3414,7 +3693,7 @@ protected:
             if (kl.borderW > 0.f) dnStroke(m_canvas, x0, y0, x1, y1, r, kl.border, kl.borderW * v.sc, 5);
 
             // 선택한 키: 파란 테두리와 손잡이 (모서리 동그라미, 변 알약)
-            if (g.id == m_sel && !(m_tab == 2 && m_statTab > 0)) drawSelection(m_canvas, x0, y0, x1, y1, r);
+            if (g.id == m_sel && !m_photoSelected && !(m_tab == 2 && m_statTab > 0)) drawSelection(m_canvas, x0, y0, x1, y1, r);
 
             auto lab = g.name.empty() ? nullptr : this->tileLabel(li++);
             if (lab) {
@@ -3462,7 +3741,9 @@ protected:
         }
     }
 
-    void beginDrag(CCPoint p, float x, float y, float w, float h, int handle, int stat = -1) {
+    void beginDrag(CCPoint p, float x, float y, float w, float h, int handle, int stat = -1, bool photo = false) {
+        m_beforeDrag = captureState();
+        m_dragPhoto = photo;
         m_dragMode = handle < 0 ? 1 : 2;
         m_dragStat = stat;
         m_handle = handle;
@@ -3474,6 +3755,23 @@ protected:
         m_dragMode = 0;
         if (!m_mapMode) this->updateFit();
         View v = this->view();
+        auto pickPhoto = [&](bool priority) {
+            if (!g_photo.texture || !g_photo.visible) return false;
+            auto box = photoRect();
+            CCRect hit(v.ox + box.origin.x * v.sc, v.oy + box.origin.y * v.sc,
+                       box.size.width * v.sc, box.size.height * v.sc);
+            int handle = priority && !m_mapMode ? hitHandle(p, hit.origin.x, hit.origin.y,
+                         hit.origin.x + hit.size.width, hit.origin.y + hit.size.height) : -1;
+            if (handle < 0 && !hit.containsPoint(p)) return false;
+            beginDrag(p, box.origin.x, box.origin.y, box.size.width, box.size.height, handle, -1, true);
+            if (!m_photoSelected) selectPhoto();
+            return true;
+        };
+        if (m_photoSelected && pickPhoto(true)) return;
+        if (m_photoSelected) {
+            m_photoSelected = false;
+            redrawCanvas();
+        }
 
         if (m_tab == 2 && m_statTab > 0 && !m_mapMode) {
             if (auto box = m_viewer->statBox(m_statTab - 1)) {
@@ -3501,10 +3799,7 @@ protected:
             float x1 = x0 + g->w * v.sc, y1 = y0 + g->h * v.sc;
             int hnd = this->hitHandle(p, x0, y0, x1, y1);
             if (hnd >= 0) {
-                m_dragMode = 2;
-                m_handle = hnd;
-                m_dragStart = p;
-                m_dragRect[0] = g->x; m_dragRect[1] = g->y; m_dragRect[2] = g->w; m_dragRect[3] = g->h;
+                beginDrag(p, g->x, g->y, g->w, g->h, hnd);
                 return;
             }
         }
@@ -3517,11 +3812,8 @@ protected:
             if (!r.containsPoint(p)) continue;
             bool changed = m_sel != g.id || (m_tab == 2 && m_statTab > 0);
             m_statTab = 0;
-            m_dragStat = -1;
             m_sel = g.id;
-            m_dragMode = 1;
-            m_dragStart = p;
-            m_dragRect[0] = g.x; m_dragRect[1] = g.y; m_dragRect[2] = g.w; m_dragRect[3] = g.h;
+            beginDrag(p, g.x, g.y, g.w, g.h, -1);
             this->redrawCanvas();
             if (changed) {
                 m_scroll = 0.f;
@@ -3529,12 +3821,13 @@ protected:
             }
             return;
         }
+        pickPhoto(false);
     }
 
     void canvasMove(CCPoint p) {
         if (m_dragMode == 0) return;
-        auto key = m_dragStat < 0 ? keyById(m_sel) : nullptr;
-        if (m_dragStat < 0 && !key) return;
+        auto key = m_dragStat < 0 && !m_dragPhoto ? keyById(m_sel) : nullptr;
+        if (m_dragStat < 0 && !m_dragPhoto && !key) return;
         View v = view();
         if (v.sc <= 0.f) return;
         float dx = (p.x - m_dragStart.x) / v.sc, dy = (p.y - m_dragStart.y) / v.sc;
@@ -3549,10 +3842,25 @@ protected:
             bool bottom = edge == 0 || edge == 1 || edge == 4;
             bool top = edge == 2 || edge == 3 || edge == 5;
             float oldW = w, oldH = h;
-            if (left || right) w = std::clamp(w + (left ? -dx : dx), m_dragStat < 0 ? 12.f : 24.f, m_dragStat < 0 ? 500.f : 200.f);
-            if (bottom || top) h = std::clamp(h + (bottom ? -dy : dy), 12.f, m_dragStat < 0 ? 500.f : 100.f);
+            float minW = m_dragPhoto ? 10.f : m_dragStat < 0 ? 12.f : 24.f;
+            float maxW = m_dragPhoto ? 1000.f : m_dragStat < 0 ? 500.f : 200.f;
+            float maxH = m_dragPhoto ? 1000.f : m_dragStat < 0 ? 500.f : 100.f;
+            if (left || right) w = std::round(std::clamp(w + (left ? -dx : dx), minW, maxW));
+            if (bottom || top) h = std::round(std::clamp(h + (bottom ? -dy : dy), m_dragPhoto ? 10.f : 12.f, maxH));
             if (left) x += oldW - w;
             if (bottom) y += oldH - h;
+        }
+        if (m_dragPhoto) {
+            auto center = m_viewer->photoCenter();
+            g_photo.x = std::clamp(std::round(x + w / 2.f - center.x), -500.f, 500.f);
+            g_photo.y = std::clamp(std::round(y + h / 2.f - center.y), -300.f, 300.f);
+            if (m_dragMode == 2) {
+                g_photo.width = w;
+                g_photo.height = h;
+            }
+            m_viewer->updatePhoto();
+            redrawCanvas();
+            return;
         }
         x = std::clamp(std::round(x), -500.f, 500.f);
         y = std::clamp(std::round(y), -300.f, 300.f);
@@ -3580,9 +3888,13 @@ protected:
     void canvasUp(CCPoint) {
         if (m_dragMode == 0) return;
         m_dragMode = 0;
-        if (m_dragStat >= 0) saveStat(m_dragStat);
+        if (m_dragPhoto) saveBackgroundPhoto();
+        else if (m_dragStat >= 0) saveStat(m_dragStat);
         else if (auto key = keyById(m_sel)) saveKey(*key);
+        if (m_beforeDrag) recordEdit(std::move(*m_beforeDrag));
+        m_beforeDrag.reset();
         m_dragStat = -1;
+        m_dragPhoto = false;
         m_pendingRebuild = true;
         redrawCanvas();
     }
@@ -3712,7 +4024,8 @@ protected:
 
     void openColors(GradientStops current, bool gradient,
                     std::function<void(GradientStops const&)> apply) {
-        auto popup = VisualColorPopup::create(current, gradient, m_light, std::move(apply), [this] {
+        auto popup = VisualColorPopup::create(current, gradient, m_light,
+            [this, apply = std::move(apply)](GradientStops const& colors) { trackEdit([&] { apply(colors); }); }, [this] {
             m_modal = false;
             m_pendingRebuild = true;
         });
@@ -3983,6 +4296,17 @@ protected:
 
     void showInput(std::string title, std::string value,
                    std::function<bool(std::string const&)> apply, std::function<void(int)> capture = {}) {
+        if (apply) {
+            apply = [this, run = std::move(apply)](std::string const& input) {
+                auto before = captureState();
+                if (!run(input)) return false;
+                recordEdit(std::move(before));
+                return true;
+            };
+        }
+        if (capture) capture = [this, run = std::move(capture)](int key) {
+            trackEdit([&] { run(key); });
+        };
         auto popup = EditorInputPopup::create(std::move(title), std::move(value), std::move(apply),
             std::move(capture), [this] { m_modal = false; m_pendingRebuild = true; });
         if (popup) {
@@ -4284,8 +4608,13 @@ protected:
     void buildCounterTab() {
         counterPicker();
         if (m_statTab > 0) {
-            rowInfo(statName(m_statTab - 1));
-            buildStatOptions(m_statTab - 1);
+            int metric = m_statTab - 1;
+            rowInfo(statName(metric));
+            if (metric == TotalMetric) {
+                rowToggle("Reset total on exit", [] { return Mod::get()->getSettingValue<bool>("reset-total-on-exit"); },
+                    [](bool reset) { Mod::get()->setSettingValue<bool>("reset-total-on-exit", reset); });
+            }
+            buildStatOptions(metric);
             return;
         }
         rowInfo(uiText("Selected counter ") + describeKey(m_sel));
@@ -4378,28 +4707,35 @@ protected:
                     editor->setStatus("Use a PNG or JPEG up to 24 MB and 4096 px.");
                     return;
                 }
-                // Write the new image to the other slot before changing the active file.
-                std::string file = g_photo.file == "background-0" ? "background-1" : "background-0";
-                if (writeBinarySafe(photoPath(file), image).isErr()) {
+                // Keep earlier imports available until they fall out of undo history.
+                std::string file;
+                for (unsigned slot = 0; ; ++slot) {
+                    file = "background-" + std::to_string(slot);
+                    if (!std::filesystem::exists(photoPath(file), ec)) break;
+                }
+                if (ec || writeBinarySafe(photoPath(file), image).isErr()) {
                     editor->setStatus("Could not store the photo.");
                     return;
                 }
+                auto before = editor->captureState();
                 auto previous = g_photo;
-                g_photo.file = std::move(file);
+                g_photo.file = file;
                 g_photo.texture = Ref<CCTexture2D>(texture);
                 g_photo.visible = true;
                 saveBackgroundPhoto();
                 if (Mod::get()->saveData().isErr()) {
                     g_photo = std::move(previous);
                     saveBackgroundPhoto();
+                    std::filesystem::remove(photoPath(file), ec);
                     editor->setStatus("Could not store the photo.");
                     return;
                 }
-                if (!previous.file.empty()) std::filesystem::remove(photoPath(previous.file), ec);
+                editor->m_photoFiles.insert(file);
+                if (!previous.file.empty()) editor->m_photoFiles.insert(previous.file);
+                editor->recordEdit(std::move(before));
+                editor->cleanPhotoHistory(true);
                 editor->m_viewer->updatePhoto();
-                editor->redrawCanvas();
-                editor->m_pendingRebuild = true;
-                editor->setStatus("Background photo loaded.");
+                editor->selectPhoto(true);
             });
     }
 
@@ -4408,6 +4744,13 @@ protected:
         rowButton(g_photo.texture ? "Replace photo" : "Choose photo", lerpC(uiField(), uiAccent(), 0.18f),
             [this] { chooseBackgroundPhoto(); });
         if (!g_photo.texture) return;
+        rowButton("Select photo on canvas", uiField(), [this] {
+            if (!g_photo.visible) {
+                g_photo.visible = true;
+                refreshPhoto();
+            }
+            selectPhoto(true);
+        });
         rowToggle("Show photo", [] { return g_photo.visible; }, [this](bool show) {
             g_photo.visible = show;
             refreshPhoto();
@@ -4434,8 +4777,8 @@ protected:
                 setStatus("Could not store the photo.");
                 return;
             }
-            std::error_code ec;
-            std::filesystem::remove(photoPath(previous.file), ec);
+            m_photoFiles.insert(previous.file);
+            m_photoSelected = false;
             m_viewer->updatePhoto();
             redrawCanvas();
             m_pendingRebuild = true;
@@ -4561,7 +4904,7 @@ protected:
         if (hit < 0) return false;
         auto control = m_scrollCtls[hit].wheel;
         if (!control) return false;
-        control(delta < 0.f ? 1 : -1);
+        trackEdit([&] { control(delta < 0.f ? 1 : -1); });
         return true;
     }
 
@@ -4586,8 +4929,10 @@ public:
         float delta = std::copysign(std::clamp(std::abs(y), 24.f, 72.f), y);
         if (m_mapMode) {
             auto pos = m_viewer->getPosition();
-            Mod::get()->setSettingValue<double>("pos-y", std::clamp((pos.y - delta) / H * 100., 0., 100.));
-            refreshAll();
+            trackEdit([&] {
+                Mod::get()->setSettingValue<double>("pos-y", std::clamp((pos.y - delta) / H * 100., 0., 100.));
+                refreshAll();
+            });
         } else {
             auto cursor = convertToNodeSpace(geode::cocos::getMousePos());
             if (m_zoomPanel.containsPoint(cursor)) changeZoom(y < 0.f ? 1.12f : 1.f / 1.12f);
@@ -4609,7 +4954,7 @@ public:
             if (!c.r.containsPoint(p)) continue;
             m_activeFixed = i;
             auto fn = c.down;
-            if (fn) fn(p);
+            if (fn) trackEdit([&] { fn(p); });
             return true;
         }
         if (!m_mapMode && this->inViewport(p)) {
@@ -4617,7 +4962,7 @@ public:
             if (i >= 0) {
                 m_activeScroll = i;
                 auto fn = m_scrollCtls[i].down;
-                if (fn) fn(this->toLocal(p));
+                if (fn) trackEdit([&] { fn(this->toLocal(p)); });
             } else {
                 m_scrolling = true;
                 m_lastY = p.y;
@@ -4665,7 +5010,10 @@ public:
                 next->m_sel = m_sel;
                 next->m_tab = m_tab;
                 next->m_statTab = m_statTab;
-                next->m_undoPreset = m_undoPreset;
+                next->m_photoSelected = m_photoSelected;
+                next->m_undoPreset = std::move(m_undoPreset);
+                next->m_undo = std::move(m_undo);
+                next->m_photoFiles = std::move(m_photoFiles);
                 next->m_scroll = m_scroll;
                 next->m_zoom = m_zoom;
                 next->m_pan = m_pan;
@@ -4683,7 +5031,7 @@ public:
             m_closing = false;
             this->setPauseVisible(true);
             m_viewer->applyLook();
-            (void)Mod::get()->saveData();
+            if (Mod::get()->saveData().isOk()) cleanPhotoHistory(false);
             this->removeFromParentAndCleanup(true);
         }
     }
