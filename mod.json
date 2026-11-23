@@ -8,7 +8,7 @@
   },
   "id": "nonest.keyviewer",
   "name": "Key Viewer",
-  "version": "v1.0.6",
+  "version": "v1.0.7",
   "developer": "nonest",
   "description": "A clean, customizable Geometry Dash input overlay with compact statistics, two-color note gradients, and a light or dark editor.",
   "settings": {
@@ -57,6 +57,12 @@
       "default": true,
       "name": "Reset Total on Level Exit",
       "description": "Start the Total box at zero after leaving a level. Disable to keep the total between levels."
+    },
+    "reset-keys-on-exit": {
+      "type": "bool",
+      "default": true,
+      "name": "Reset Key Counts on Level Exit",
+      "description": "Start each key counter at zero after leaving a level. Disable to keep each key's count between levels."
     },
     "show-glow": {
       "type": "bool",

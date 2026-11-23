@@ -1271,15 +1271,24 @@ struct Note {
 
 struct NoteSpan { float distance; float length; };
 
-static NoteSpan noteSpan(Note const& note, Look const& look, double now, float trackHeight) {
-    float speed = look.noteSpeed;
-    // Stop extending a held bar once it fills the track, then let its tail travel out.
-    double maxFeed = note.start + trackHeight / (speed * look.holdLengthScale);
-    double tailStart = std::min(maxFeed, note.end < 0. ? now : note.end);
-    float length = holdNoteLength(note.start, tailStart, speed, look.holdLengthScale, trackHeight);
-    if (look.fixedShortNotes && note.end >= 0. && note.end - note.start <= look.shortNoteTime)
-        length = std::max(length, look.shortNoteLength);
-    return {static_cast<float>(std::max(0., now - tailStart) * speed), length};
+static std::array<NoteSpan, 2> noteSpans(Note const& note, Look const& look, double now, float trackHeight) {
+    const double travelTime = trackHeight / static_cast<double>(look.noteSpeed);
+    const double firstCut = note.start + travelTime / look.holdLengthScale;
+    const double end = note.end < 0. ? now : note.end;
+    auto traveled = [&](double time) { return static_cast<float>(std::max(0., now - time) * look.noteSpeed); };
+    if (end < firstCut) {
+        float length = holdNoteLength(note.start, end, look.noteSpeed, look.holdLengthScale, trackHeight);
+        if (look.fixedShortNotes && note.end >= 0. && note.end - note.start <= look.shortNoteTime)
+            length = std::max(length, look.shortNoteLength);
+        return {{{0.f, 0.f}, {traveled(end), length}}};
+    }
+
+    // Feed a new segment from the key as the previous one leaves. After the
+    // first segment, advancing at track speed keeps their boundaries together.
+    const double segmentStart = firstCut + std::floor((end - firstCut) / travelTime) * travelTime;
+    const float seam = std::min(2.5f, trackHeight * 0.10f);
+    float length = holdNoteLength(segmentStart, end, look.noteSpeed, 1.f, trackHeight);
+    return {{{traveled(segmentStart) + seam, trackHeight - seam}, {traveled(end), length}}};
 }
 
 // ---------------------------------------------------------------
@@ -1453,6 +1462,8 @@ public:
         return nullptr;
     }
 
+    int pressCount() const { return m_presses; }
+
     void setStatValue(int value) {
         if (m_presses == value) return;
         m_presses = value;
@@ -1514,7 +1525,7 @@ public:
         const unsigned bit = 1u << source;
         if (down) {
             m_held |= bit;
-            ++m_presses;
+            if (m_presses < std::numeric_limits<int>::max()) ++m_presses;
             m_countStart = t;
             setCountText();
             fitCount(t);
@@ -1583,14 +1594,18 @@ public:
             clearNotes();
             return;
         }
-        std::erase_if(m_notes, [&](Note const& note) { return noteSpan(note, m_look, now, H).distance >= H; });
+        std::erase_if(m_notes, [&](Note const& note) {
+            return note.end >= 0. && (now - note.end) * m_look.noteSpeed >= H;
+        });
 
         float nw = std::max(2.f, m_look.noteWidth * m_w);
         float x = (m_w - nw) / 2.f;
         for (auto const& note : m_notes) {
-            auto span = noteSpan(note, m_look, now, H);
-            float y = m_look.reverseFlow ? -m_look.noteBaseGap - span.distance : m_noteStart + span.distance;
-            paintNote(m_noteFill, m_noteGlow, m_look, x, y, nw, span.length, span.distance, H);
+            for (auto span : noteSpans(note, m_look, now, H)) {
+                if (span.distance >= H || span.length < 0.05f) continue;
+                float y = m_look.reverseFlow ? -m_look.noteBaseGap - span.distance : m_noteStart + span.distance;
+                paintNote(m_noteFill, m_noteGlow, m_look, x, y, nw, span.length, span.distance, H);
+            }
         }
     }
 
@@ -1773,6 +1788,7 @@ static void positionPhoto(CCNode* parent, CCSprite*& sprite, CCPoint center, flo
 class KeyViewer : public CCLayer {
 protected:
     std::vector<LaneRef> m_lanes;
+    StyleValues m_keyCounts;
     std::vector<LaneGeo> m_geo;
     CCSprite* m_photo = nullptr;
     std::array<KeyLane*, StatCount> m_stats{};
@@ -1801,6 +1817,8 @@ protected:
         if (!Mod::get()->getSettingValue<bool>("reset-total-on-exit"))
             m_total = static_cast<int>(std::clamp<int64_t>(Mod::get()->getSavedValue<int64_t>("cumulative-total", 0),
                                                            0, std::numeric_limits<int>::max()));
+        if (!Mod::get()->getSettingValue<bool>("reset-keys-on-exit"))
+            m_keyCounts = decodeStyle(Mod::get()->getSavedValue<std::string>("key-press-counts", ""));
         this->setTouchEnabled(true);
 
         m_frame = CCDrawNode::create();
@@ -1835,6 +1853,7 @@ protected:
     void syncLanes() {
         for (auto it = m_lanes.begin(); it != m_lanes.end();) {
             if (!keyById(it->id)) {
+                m_keyCounts[std::to_string(it->id)] = it->lane->pressCount();
                 it->lane->removeFromParentAndCleanup(true);
                 it = m_lanes.erase(it);
             } else {
@@ -1845,6 +1864,8 @@ protected:
             if (laneFor(k.id)) continue;
             auto lane = KeyLane::create(kLabels[1]);
             if (!lane) continue;
+            if (auto count = m_keyCounts.find(std::to_string(k.id)); count != m_keyCounts.end())
+                lane->setStatValue(static_cast<int>(std::clamp(count->second, 0., double(std::numeric_limits<int>::max()))));
             this->addChild(lane);
             m_lanes.push_back({k.id, lane});
         }
@@ -2124,8 +2145,18 @@ public:
     void onExit() override {
         auto mod = Mod::get();
         int64_t total = mod->getSettingValue<bool>("reset-total-on-exit") ? 0 : m_total;
-        if (total != mod->getSavedValue<int64_t>("cumulative-total", 0)) {
+        StyleValues counts;
+        if (!mod->getSettingValue<bool>("reset-keys-on-exit")) {
+            for (auto const& [id, lane] : m_lanes) {
+                lane->suspendNotes();
+                if (lane->pressCount() > 0) counts[std::to_string(id)] = lane->pressCount();
+            }
+        }
+        auto encoded = encodeStyle(counts);
+        if (total != mod->getSavedValue<int64_t>("cumulative-total", 0) ||
+            encoded != mod->getSavedValue<std::string>("key-press-counts", "")) {
             mod->setSavedValue<int64_t>("cumulative-total", total);
+            mod->setSavedValue<std::string>("key-press-counts", encoded);
             (void)mod->saveData();
         }
         CCLayer::onExit();
@@ -2137,6 +2168,7 @@ public:
             if (m_look.resetOnRestart) r.lane->resetCount();
         }
         if (m_look.resetOnRestart) {
+            m_keyCounts.clear();
             m_hits.clear();
             m_total = 0;
             m_peak = 0;
@@ -2699,7 +2731,7 @@ public:
 
 static SetDef const kEditorGlobalSettings[] = {
     {"show-viewer", SetType::Bool}, {"reset-on-restart", SetType::Bool}, {"reset-total-on-exit", SetType::Bool},
-    {"box-size", SetType::Num}, {"jump-width", SetType::Num}, {"box-gap", SetType::Num},
+    {"reset-keys-on-exit", SetType::Bool}, {"box-size", SetType::Num}, {"jump-width", SetType::Num}, {"box-gap", SetType::Num},
     {"pos-x", SetType::Num}, {"pos-y", SetType::Num}
 };
 
@@ -2714,6 +2746,16 @@ struct EditorState {
     std::string language;
     std::string theme;
     bool operator==(EditorState const&) const = default;
+};
+
+enum class CanvasItemKind { Key, Stat, Photo };
+
+struct CanvasItem {
+    CanvasItemKind kind;
+    int id;
+    CCRect box;
+
+    bool sameItem(CanvasItem const& other) const { return kind == other.kind && id == other.id; }
 };
 
 class KVEditor : public CCLayer {
@@ -2748,7 +2790,7 @@ protected:
     CCDrawNode* m_back = nullptr;
     CCDrawNode* m_chrome = nullptr;
     CCDrawNode* m_canvas = nullptr;
-    CCDrawNode* m_photoFrame = nullptr;
+    CCDrawNode* m_selectionOverlay = nullptr;
     CCClippingNode* m_canvasClip = nullptr;
     CCSprite* m_photoPreview = nullptr;
     CCDrawNode* m_bar = nullptr;
@@ -2772,7 +2814,12 @@ protected:
     float m_lastY = 0.f;
 
     // 캔버스 드래그: 0 없음, 1 이동, 2 크기 조절
+    static constexpr int kMarqueeDrag = 3;
+    static constexpr int kGroupDrag = 4;
     int m_dragMode = 0;
+    CCPoint m_marqueeEnd{0.f, 0.f};
+    std::vector<CanvasItem> m_group;
+    std::vector<CanvasItem> m_groupStart;
     int m_handle = -1;
     CCPoint m_dragStart = {0.f, 0.f};
     float m_dragRect[4] = {0.f, 0.f, 0.f, 0.f};
@@ -2935,8 +2982,8 @@ protected:
         canvasClip->addChild(m_canvas, 0);
         m_canvasLabels = CCNode::create();
         canvasClip->addChild(m_canvasLabels, 1);
-        m_photoFrame = CCDrawNode::create();
-        canvasClip->addChild(m_photoFrame, 2);
+        m_selectionOverlay = CCDrawNode::create();
+        canvasClip->addChild(m_selectionOverlay, 2);
         m_depthPreview = CCNode::create();
         m_canvasLabels->addChild(m_depthPreview);
         m_notePreview = CCNode::create();
@@ -2986,7 +3033,7 @@ protected:
             c.down = [this](CCPoint) { m_closing = true; };
             m_fixed.push_back(c);
         }
-        m_status = mkLabel(m_winLabels, "Tap a key to select it. Drag it to move, drag the handles to resize.",
+        m_status = mkLabel(m_winLabels, "Drag empty space to select multiple boxes.",
                            0.24f, uiMuted(), CCPoint(cvX0 + 8.f, cvY0 + 8.f), 0.f);
 
         // 탭
@@ -3598,6 +3645,7 @@ protected:
     }
 
     void selectPhoto(bool fit = false) {
+        m_group.clear();
         m_photoSelected = true;
         m_statTab = 0;
         m_tab = 3;
@@ -3618,9 +3666,69 @@ protected:
         setStatus("Drag photo to move. Drag handles to resize.");
     }
 
+    std::vector<CanvasItem> canvasItems() const {
+        std::vector<CanvasItem> items;
+        auto const& keys = m_viewer->geo();
+        auto const& stats = m_viewer->statGeo();
+        items.reserve(keys.size() + stats.size() + 1);
+        for (auto const& key : keys) items.push_back({CanvasItemKind::Key, key.id, {key.x, key.y, key.w, key.h}});
+        for (auto const& stat : stats)
+            items.push_back({CanvasItemKind::Stat, stat.metric, {stat.position.x, stat.position.y, stat.width, stat.height}});
+        if (g_photo.texture && g_photo.visible) items.push_back({CanvasItemKind::Photo, 0, photoRect()});
+        return items;
+    }
+
+    static CCRect projectBox(CCRect const& box, View view) {
+        return {view.ox + box.origin.x * view.sc, view.oy + box.origin.y * view.sc,
+                box.size.width * view.sc, box.size.height * view.sc};
+    }
+
+    bool inGroup(CanvasItem const& item) const {
+        return std::any_of(m_group.begin(), m_group.end(), [&](CanvasItem const& pick) { return pick.sameItem(item); });
+    }
+
+    CCRect marqueeBox() const {
+        return {std::min(m_dragStart.x, m_marqueeEnd.x), std::min(m_dragStart.y, m_marqueeEnd.y),
+                std::abs(m_marqueeEnd.x - m_dragStart.x), std::abs(m_marqueeEnd.y - m_dragStart.y)};
+    }
+
+    void updateMarquee(CCPoint end) {
+        if (!m_mapMode) end = CCPoint{std::clamp(end.x, cvX0, cvX1), std::clamp(end.y, cvY0 + 14.f, cvY1)};
+        m_marqueeEnd = end;
+        m_group.clear();
+        auto marquee = marqueeBox();
+        if (marquee.size.width < 2.f || marquee.size.height < 2.f) return;
+        auto overlaps = [](CCRect const& a, CCRect const& b) {
+            return a.origin.x < b.origin.x + b.size.width && a.origin.x + a.size.width > b.origin.x &&
+                   a.origin.y < b.origin.y + b.size.height && a.origin.y + a.size.height > b.origin.y;
+        };
+        auto v = view();
+        for (auto const& item : canvasItems()) {
+            if (overlaps(projectBox(item.box, v), marquee)) m_group.push_back(item);
+        }
+    }
+
+    void drawGroup(View v) {
+        if (!m_group.empty()) {
+            for (auto const& item : canvasItems()) {
+                if (!inGroup(item)) continue;
+                auto box = projectBox(item.box, v);
+                dnStrokeA(m_selectionOverlay, box.origin.x, box.origin.y, box.origin.x + box.size.width,
+                          box.origin.y + box.size.height, 2.f, uiAccent(), 1.35f, 0.92f);
+            }
+        }
+        if (m_dragMode == kMarqueeDrag) {
+            auto box = marqueeBox();
+            if (box.size.width < 2.f || box.size.height < 2.f) return;
+            float x = box.origin.x, y = box.origin.y;
+            dnRect(m_selectionOverlay, x, y, x + box.size.width, y + box.size.height, uiAccent(), 0.15f);
+            dnStrokeA(m_selectionOverlay, x, y, x + box.size.width, y + box.size.height, 0.65f, uiAccent(), 0.8f, 0.90f);
+        }
+    }
+
     void redrawCanvas() {
         m_canvas->clear();
-        m_photoFrame->clear();
+        m_selectionOverlay->clear();
         m_counterPreview->removeAllChildrenWithCleanup(true);
         m_notePreview->removeAllChildrenWithCleanup(true);
         m_depthPreview->removeAllChildrenWithCleanup(true);
@@ -3631,10 +3739,10 @@ protected:
         positionPhoto(m_canvasClip, m_photoPreview, {transform.ox + center.x * transform.sc,
                                                      transform.oy + center.y * transform.sc},
                       transform.sc, !m_mapMode || !m_viewer->isVisible());
-        if (m_photoSelected && g_photo.texture && g_photo.visible) {
+        if (m_photoSelected && m_group.empty() && m_dragMode != kMarqueeDrag && g_photo.texture && g_photo.visible) {
             auto box = photoRect();
             float x = transform.ox + box.origin.x * transform.sc, y = transform.oy + box.origin.y * transform.sc;
-            drawSelection(m_photoFrame, x, y, x + box.size.width * transform.sc, y + box.size.height * transform.sc, 2.f);
+            drawSelection(m_selectionOverlay, x, y, x + box.size.width * transform.sc, y + box.size.height * transform.sc, 2.f);
         }
         if (!m_mapMode || !m_viewer->isVisible()) {
             auto v = this->view();
@@ -3648,7 +3756,7 @@ protected:
                 box->tick(nowSec(), 0.f, 0.f);
                 CCPoint pos{v.ox + stat.position.x * v.sc, v.oy + stat.position.y * v.sc};
                 box->setPosition(pos);
-                if (m_tab == 2 && m_statTab == stat.metric + 1) {
+                if (m_group.empty() && m_dragMode != kMarqueeDrag && m_tab == 2 && m_statTab == stat.metric + 1) {
                     auto outline = CCDrawNode::create();
                     float x = pos.x, y = pos.y, width = stat.width * v.sc, height = stat.height * v.sc;
                     drawSelection(outline, x, y, x + width, y + height, 3.f);
@@ -3658,7 +3766,7 @@ protected:
                 m_counterPreview->addChild(box);
             }
         }
-        if (m_mapMode && m_viewer->isVisible() && m_tab == 2 && m_statTab > 0) {
+        if (m_mapMode && m_viewer->isVisible() && m_group.empty() && m_dragMode != kMarqueeDrag && m_tab == 2 && m_statTab > 0) {
             if (auto box = m_viewer->statBox(m_statTab - 1)) {
                 auto v = this->view();
                 float x = v.ox + box->position.x, y = v.oy + box->position.y;
@@ -3693,7 +3801,8 @@ protected:
             if (kl.borderW > 0.f) dnStroke(m_canvas, x0, y0, x1, y1, r, kl.border, kl.borderW * v.sc, 5);
 
             // 선택한 키: 파란 테두리와 손잡이 (모서리 동그라미, 변 알약)
-            if (g.id == m_sel && !m_photoSelected && !(m_tab == 2 && m_statTab > 0)) drawSelection(m_canvas, x0, y0, x1, y1, r);
+            if (g.id == m_sel && m_group.empty() && m_dragMode != kMarqueeDrag &&
+                !m_photoSelected && !(m_tab == 2 && m_statTab > 0)) drawSelection(m_canvas, x0, y0, x1, y1, r);
 
             auto lab = g.name.empty() ? nullptr : this->tileLabel(li++);
             if (lab) {
@@ -3709,6 +3818,7 @@ protected:
             }
             if (!m_mapMode && g.id == m_sel) drawCounterPreview(kl, x0, y0, g.w, g.h, v.sc, fill);
         }
+        drawGroup(v);
     }
 
     // ---------- 캔버스 터치 ----------
@@ -3751,10 +3861,38 @@ protected:
         m_dragRect[0] = x; m_dragRect[1] = y; m_dragRect[2] = w; m_dragRect[3] = h;
     }
 
+    void beginMarquee(CCPoint p) {
+        m_group.clear();
+        m_photoSelected = false;
+        m_dragStart = m_marqueeEnd = p;
+        m_dragMode = kMarqueeDrag;
+        redrawCanvas();
+    }
+
     void canvasDown(CCPoint p) {
         m_dragMode = 0;
         if (!m_mapMode) this->updateFit();
         View v = this->view();
+        if (CCDirector::get()->getKeyboardDispatcher()->getShiftKeyPressed()) {
+            beginMarquee(p);
+            return;
+        }
+        bool hadGroup = !m_group.empty();
+        if (hadGroup) {
+            auto items = canvasItems();
+            std::erase_if(items, [&](CanvasItem const& item) { return !inGroup(item); });
+            if (std::any_of(items.begin(), items.end(), [&](CanvasItem const& item) {
+                return projectBox(item.box, v).containsPoint(p);
+            })) {
+                m_beforeDrag = captureState();
+                m_groupStart = std::move(items);
+                m_dragStart = p;
+                m_dragMode = kGroupDrag;
+                return;
+            }
+            m_group.clear();
+            redrawCanvas();
+        }
         auto pickPhoto = [&](bool priority) {
             if (!g_photo.texture || !g_photo.visible) return false;
             auto box = photoRect();
@@ -3773,7 +3911,7 @@ protected:
             redrawCanvas();
         }
 
-        if (m_tab == 2 && m_statTab > 0 && !m_mapMode) {
+        if (!hadGroup && m_tab == 2 && m_statTab > 0 && !m_mapMode) {
             if (auto box = m_viewer->statBox(m_statTab - 1)) {
                 float x = v.ox + box->position.x * v.sc, y = v.oy + box->position.y * v.sc;
                 int handle = hitHandle(p, x, y, x + box->width * v.sc, y + box->height * v.sc);
@@ -3794,7 +3932,7 @@ protected:
         }
 
         // 선택한 키의 손잡이를 먼저 확인 (지도 모드에서는 이동만 가능)
-        if (auto g = this->geoById(m_sel); g && !m_mapMode && !(m_tab == 2 && m_statTab > 0)) {
+        if (auto g = this->geoById(m_sel); g && !hadGroup && !m_mapMode && !(m_tab == 2 && m_statTab > 0)) {
             float x0 = v.ox + g->x * v.sc, y0 = v.oy + g->y * v.sc;
             float x1 = x0 + g->w * v.sc, y1 = y0 + g->h * v.sc;
             int hnd = this->hitHandle(p, x0, y0, x1, y1);
@@ -3821,16 +3959,71 @@ protected:
             }
             return;
         }
-        pickPhoto(false);
+        if (!pickPhoto(false)) beginMarquee(p);
+    }
+
+    void moveGroup(float dx, float dy) {
+        float minDX = -1000.f, maxDX = 1000.f, minDY = -600.f, maxDY = 600.f;
+        for (auto const& item : m_groupStart) {
+            if (item.kind == CanvasItemKind::Photo) continue;
+            minDX = std::max(minDX, std::min(0.f, -500.f - item.box.origin.x));
+            maxDX = std::min(maxDX, std::max(0.f, 500.f - item.box.origin.x));
+            minDY = std::max(minDY, std::min(0.f, -300.f - item.box.origin.y));
+            maxDY = std::min(maxDY, std::max(0.f, 300.f - item.box.origin.y));
+        }
+        dx = std::clamp(std::round(dx), minDX, maxDX);
+        dy = std::clamp(std::round(dy), minDY, maxDY);
+        CanvasItem const* photo = nullptr;
+        for (auto const& item : m_groupStart) {
+            float x = item.box.origin.x + dx, y = item.box.origin.y + dy;
+            switch (item.kind) {
+                case CanvasItemKind::Key:
+                    if (auto key = keyById(item.id)) {
+                        key->x = x;
+                        key->y = y;
+                    }
+                    break;
+                case CanvasItemKind::Stat: {
+                    auto& settings = g_statSettings[item.id];
+                    if (dx == 0.f && dy == 0.f) {
+                        settings = m_beforeDrag->stats[item.id];
+                    } else {
+                        settings["anchor"] = 5;
+                        settings["x"] = x;
+                        settings["y"] = y;
+                    }
+                    break;
+                }
+                case CanvasItemKind::Photo: photo = &item; break;
+            }
+        }
+        m_viewer->applyLook();
+        if (photo) {
+            auto center = m_viewer->photoCenter();
+            auto const& box = photo->box;
+            g_photo.x = std::clamp(box.origin.x + box.size.width / 2.f + dx - center.x, -500.f, 500.f);
+            g_photo.y = std::clamp(box.origin.y + box.size.height / 2.f + dy - center.y, -300.f, 300.f);
+            m_viewer->updatePhoto();
+        }
+        redrawCanvas();
     }
 
     void canvasMove(CCPoint p) {
         if (m_dragMode == 0) return;
-        auto key = m_dragStat < 0 && !m_dragPhoto ? keyById(m_sel) : nullptr;
-        if (m_dragStat < 0 && !m_dragPhoto && !key) return;
-        View v = view();
+        if (m_dragMode == kMarqueeDrag) {
+            updateMarquee(p);
+            redrawCanvas();
+            return;
+        }
+        auto v = view();
         if (v.sc <= 0.f) return;
         float dx = (p.x - m_dragStart.x) / v.sc, dy = (p.y - m_dragStart.y) / v.sc;
+        if (m_dragMode == kGroupDrag) {
+            moveGroup(dx, dy);
+            return;
+        }
+        auto key = m_dragStat < 0 && !m_dragPhoto ? keyById(m_sel) : nullptr;
+        if (m_dragStat < 0 && !m_dragPhoto && !key) return;
         float x = m_dragRect[0], y = m_dragRect[1], w = m_dragRect[2], h = m_dragRect[3];
         if (m_dragMode == 1) {
             x += dx;
@@ -3885,12 +4078,62 @@ protected:
         redrawCanvas();
     }
 
-    void canvasUp(CCPoint) {
-        if (m_dragMode == 0) return;
+    void finishMarquee(CCPoint end) {
+        updateMarquee(end);
         m_dragMode = 0;
-        if (m_dragPhoto) saveBackgroundPhoto();
+        if (m_group.size() == 1) {
+            auto item = m_group.front();
+            m_group.clear();
+            if (item.kind == CanvasItemKind::Photo) {
+                selectPhoto();
+                return;
+            }
+            if (item.kind == CanvasItemKind::Stat) {
+                selectStatEditor(item.id + 1);
+                return;
+            }
+            m_sel = item.id;
+            m_statTab = 0;
+        } else if (!m_group.empty()) {
+            auto key = std::find_if(m_group.begin(), m_group.end(),
+                [](CanvasItem const& item) { return item.kind == CanvasItemKind::Key; });
+            if (key != m_group.end()) {
+                m_sel = key->id;
+                m_statTab = 0;
+            }
+            setStatus(uiText("Selected boxes ") + std::to_string(m_group.size()));
+        }
+        m_pendingRebuild = true;
+        redrawCanvas();
+    }
+
+    void canvasUp(CCPoint end) {
+        if (m_dragMode == 0) return;
+        if (m_dragMode == kMarqueeDrag) {
+            finishMarquee(end);
+            return;
+        }
+        bool movedGroup = m_dragMode == kGroupDrag;
+        auto oldView = view();
+        if (movedGroup) {
+            for (auto const& item : m_groupStart) {
+                if (item.kind == CanvasItemKind::Stat) saveStat(item.id);
+                else if (item.kind == CanvasItemKind::Photo) saveBackgroundPhoto();
+                else if (auto key = keyById(item.id)) saveKey(*key);
+            }
+            m_groupStart.clear();
+        } else if (m_dragPhoto) saveBackgroundPhoto();
         else if (m_dragStat >= 0) saveStat(m_dragStat);
         else if (auto key = keyById(m_sel)) saveKey(*key);
+        m_dragMode = 0;
+        if (movedGroup && !m_mapMode) {
+            // Preserve what the user saw during the drag after the fitted bounds change.
+            updateFit();
+            m_zoom = oldView.sc / m_fit.sc;
+            m_pan = CCPoint{0.f, 0.f};
+            auto fitted = view();
+            m_pan = CCPoint{oldView.ox - fitted.ox, oldView.oy - fitted.oy};
+        }
         if (m_beforeDrag) recordEdit(std::move(*m_beforeDrag));
         m_beforeDrag.reset();
         m_dragStat = -1;
@@ -4576,6 +4819,8 @@ protected:
     }
 
     void selectStatEditor(int index) {
+        m_group.clear();
+        m_photoSelected = false;
         m_tab = 2;
         m_statTab = index;
         m_scroll = 0.f;
@@ -4618,6 +4863,8 @@ protected:
             return;
         }
         rowInfo(uiText("Selected counter ") + describeKey(m_sel));
+        rowToggle("Reset key counts on exit", [] { return Mod::get()->getSettingValue<bool>("reset-keys-on-exit"); },
+            [](bool reset) { Mod::get()->setSettingValue<bool>("reset-keys-on-exit", reset); });
         settingToggle("Key counters", "show-counter");
         localChoice("Placement", "count-area", {"Inside", "Outside"}, 0);
         localChoice("Direction", "count-direction", {"Below", "Above", "Left", "Right"}, 0);
@@ -5011,6 +5258,7 @@ public:
                 next->m_tab = m_tab;
                 next->m_statTab = m_statTab;
                 next->m_photoSelected = m_photoSelected;
+                next->m_group = std::move(m_group);
                 next->m_undoPreset = std::move(m_undoPreset);
                 next->m_undo = std::move(m_undo);
                 next->m_photoFiles = std::move(m_photoFiles);

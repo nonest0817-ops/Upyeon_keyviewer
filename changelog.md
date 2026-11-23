@@ -1,3 +1,9 @@
+# v1.0.7
+
+- Select multiple canvas items with a drag rectangle and move them together.
+- Feed new note segments while a key is held as earlier segments travel out.
+- Keep or reset per-key press counts independently of the Total box on level exit.
+
 # v1.0.6
 
 - Undo recent editor changes with Ctrl+Z.
