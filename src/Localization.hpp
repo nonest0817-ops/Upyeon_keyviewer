@@ -126,6 +126,7 @@ static std::string uiText(std::string const& text) {
         {"Cancel", "취소"},
         {"On", "켜기"},
         {"Key shadow", "키 그림자"},
+        {"Box shadow", "박스 그림자"},
         {"Shadow distance", "그림자 거리"},
         {"Shadow opacity %", "그림자 불투명도 %"},
         {"Shadow color", "그림자 색"},

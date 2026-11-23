@@ -1085,35 +1085,6 @@ static float textCenterY(Look const& look, float height) {
     return height / 2.f;
 }
 
-static void drawKeyDepth(CCDrawNode* under, CCDrawNode* rim, Look const& look,
-                         float x, float y, float w, float h, float scale, float press) {
-    if (w < 4.f || h < 4.f) return;
-    float radius = std::min(std::max(look.radius * h, 1.5f), std::min(w, h) * 0.48f);
-    if (look.keyShadow && look.keyShadowOpacity > 0.f) {
-        auto color = unpackC(look.keyShadowColor);
-        float offset = look.keyShadowDepth * scale;
-        for (int i = 3; i >= 0; --i) {
-            float spread = i * 0.7f * scale;
-            dnRound(under, x - spread, y - offset - spread, x + w + spread, y + h - offset + spread,
-                    radius + spread, color, look.keyShadowOpacity * (i == 0 ? 0.46f : 0.16f), 5);
-        }
-    }
-    if (!look.keyBevel) return;
-    float depth = look.keyBevelDepth * scale * (1.f - press * 0.30f);
-    auto face = lerpC(look.tile, look.pressed, press);
-    auto side = lerpC(face, {8, 9, 11}, 0.48f);
-    float alpha = look.tileOpacity / 255.f;
-    dnRound(under, x, y - depth, x + w, y + h - depth, radius, side, alpha, 5);
-    float inset = std::clamp(scale, 0.5f, 1.5f);
-    dnStrokeA(rim, x + inset, y + inset, x + w - inset, y + h - inset,
-              std::max(0.5f, radius - inset), lerpC(face, {255, 255, 255}, 0.45f), 0.8f * scale, 0.57f * alpha, 5);
-    if (w > 12.f && h > 8.f) {
-        float sideInset = std::min(radius + 3.f * scale, w * 0.37f);
-        dnRound(rim, x + sideInset, y + h - 2.1f * scale, x + w - sideInset, y + h - 1.2f * scale,
-                0.5f * scale, {255, 255, 255}, 0.26f * alpha, 4);
-    }
-}
-
 static float holdNoteLength(double start, double end, float speed, float scale, float available) {
     return std::clamp(static_cast<float>(std::max(0.0, end - start) * speed * scale),
                       0.f, std::max(0.f, available));
@@ -1157,6 +1128,85 @@ static ccColor4B noteVertexColor(ccColor3B color, float opacity) {
             static_cast<GLubyte>(std::lround(c.b * 255.f)), static_cast<GLubyte>(std::lround(c.a * 255.f))};
 }
 
+using FeatherContour = std::array<CCPoint, 28>;
+
+static FeatherContour roundedFeatherContour(float x, float y, float w, float h, float radius, float pad) {
+    FeatherContour points;
+    float r = std::max(0.f, radius + pad);
+    float left = x - pad + r, right = x + w + pad - r;
+    float bottom = y - pad + r, top = y + h + pad - r;
+    size_t i = 0;
+    auto arc = [&](float cx, float cy, float start) {
+        for (int step = 0; step <= 4; ++step) {
+            float angle = start + step * kPi / 8.f;
+            points[i++] = CCPoint{cx + r * std::cos(angle), cy + r * std::sin(angle)};
+        }
+    };
+    auto side = [&](float sx, float low, float high) {
+        for (int step = 1; step <= 4; ++step)
+            points[i++] = CCPoint{sx, low + (high - low) * step / 5.f};
+    };
+    arc(left, bottom, kPi);
+    arc(right, bottom, 1.5f * kPi);
+    side(x + w + pad, bottom, top);
+    arc(right, top, 0.f);
+    arc(left, top, 0.5f * kPi);
+    side(x - pad, top, bottom);
+    return points;
+}
+
+static void drawBoxShadow(CCDrawNode* draw, float x, float y, float w, float h,
+                          float radius, float blur, ccColor3B color, float opacity) {
+    const float inset = std::min(blur * 0.65f, std::min(w, h) * 0.32f);
+    auto inner = roundedFeatherContour(x, y, w, h, radius, -inset);
+    auto innerColor = noteVertexColor(color, opacity);
+    auto corePoint = [&](CCPoint p) -> ccV2F_C4B_T2F { return {{p.x, p.y}, innerColor, {0.f, 0.f}}; };
+    const auto center = corePoint({x + w / 2.f, y + h / 2.f});
+    for (size_t i = 0; i < inner.size(); ++i) {
+        std::array triangle{center, corePoint(inner[i]), corePoint(inner[(i + 1) % inner.size()])};
+        appendNotePolygon(draw, triangle);
+    }
+    // Adjacent bands share vertices and interpolate alpha across the whole shadow.
+    constexpr int steps = 8;
+    for (int step = 1; step <= steps; ++step) {
+        float t = static_cast<float>(step) / steps;
+        float pad = -inset + t * (blur + inset);
+        auto outer = roundedFeatherContour(x, y, w, h, radius, pad);
+        float feather = 1.f - t * t * (3.f - 2.f * t);
+        auto outerColor = noteVertexColor(color, opacity * feather);
+        for (size_t i = 0; i < inner.size(); ++i) {
+            size_t next = (i + 1) % inner.size();
+            noteQuad(draw, outer[i], outer[next], inner[next], inner[i], outerColor, innerColor);
+        }
+        inner = outer;
+        innerColor = outerColor;
+    }
+}
+
+static void drawKeyDepth(CCDrawNode* under, CCDrawNode* rim, Look const& look,
+                         float x, float y, float w, float h, float scale, float press) {
+    if (w < 4.f || h < 4.f) return;
+    float radius = std::min(std::max(look.radius * h, 1.5f), std::min(w, h) * 0.48f);
+    if (look.keyShadow && look.keyShadowOpacity > 0.f) {
+        drawBoxShadow(under, x, y - look.keyShadowDepth * scale, w, h, radius, 4.5f * scale,
+                      unpackC(look.keyShadowColor), look.keyShadowOpacity);
+    }
+    if (!look.keyBevel) return;
+    float depth = look.keyBevelDepth * scale * (1.f - press * 0.30f);
+    auto face = lerpC(look.tile, look.pressed, press);
+    auto side = lerpC(face, {8, 9, 11}, 0.48f);
+    float alpha = look.tileOpacity / 255.f;
+    dnRound(under, x, y - depth, x + w, y + h - depth, radius, side, alpha, 5);
+    float inset = std::clamp(scale, 0.5f, 1.5f);
+    dnStrokeA(rim, x + inset, y + inset, x + w - inset, y + h - inset,
+              std::max(0.5f, radius - inset), lerpC(face, {255, 255, 255}, 0.45f), 0.8f * scale, 0.57f * alpha, 5);
+    if (w > 12.f && h > 8.f) {
+        float sideInset = std::min(radius + 3.f * scale, w * 0.37f);
+        dnRound(rim, x + sideInset, y + h - 2.1f * scale, x + w - sideInset, y + h - 1.2f * scale,
+                0.5f * scale, {255, 255, 255}, 0.26f * alpha, 4);
+    }
+}
+
 static constexpr float kMaxNoteRadius = 16.f;
 
 static float visibleNoteLength(float distance, float length, float trackHeight) {
@@ -1172,32 +1222,6 @@ static void paintNoteGlow(CCDrawNode* glow, Look const& look, ccColor3B color, f
                           float x, float origin, float w, float length, float radius,
                           float position, float trackHeight) {
     struct Vertex { CCPoint point; float alpha; };
-    constexpr size_t count = 28;
-    // Unrolled straight sides keep the travel fade smooth even on long holds.
-    auto contour = [&](float pad, float alpha) {
-        std::array<Vertex, count> result;
-        float r = std::max(0.f, radius + pad);
-        float left = x - pad + r, right = x + w + pad - r;
-        float bottom = -pad + r, top = length + pad - r;
-        size_t i = 0;
-        auto arc = [&](float cx, float cy, float start) {
-            for (int step = 0; step <= 4; ++step) {
-                float angle = start + step * kPi / 8.f;
-                result[i++] = {{cx + r * std::cos(angle), cy + r * std::sin(angle)}, alpha};
-            }
-        };
-        auto side = [&](float sx, float low, float high) {
-            for (int step = 1; step <= 4; ++step)
-                result[i++] = {{sx, low + (high - low) * step / 5.f}, alpha};
-        };
-        arc(left, bottom, kPi);
-        arc(right, bottom, 1.5f * kPi);
-        side(x + w + pad, bottom, top);
-        arc(right, top, 0.f);
-        arc(left, top, 0.5f * kPi);
-        side(x - pad, top, bottom);
-        return result;
-    };
     auto clip = [](std::span<Vertex const> in, std::array<Vertex, 6>& out, float limit, bool keepAbove) {
         size_t count = 0;
         if (in.empty()) return count;
@@ -1218,14 +1242,16 @@ static void paintNoteGlow(CCDrawNode* glow, Look const& look, ccColor3B color, f
     float spread = 9.f * look.glowSize;
     float direction = look.reverseFlow ? -1.f : 1.f;
     float power = look.glowStrength * look.noteOpacity * opacity * 0.46f;
-    auto inner = contour(-std::min({1.25f, w / 4.f, length / 4.f}), 0.f);
+    auto inner = roundedFeatherContour(x, 0.f, w, length, radius, -std::min({1.25f, w / 4.f, length / 4.f}));
+    float innerAlpha = 0.f;
     for (int ring = 0; ring <= 6; ++ring) {
         float t = ring / 6.f;
         float feather = (1.f - t) * (1.f - t);
-        auto outer = contour(spread * t, feather);
-        for (size_t i = 0; i < count; ++i) {
-            size_t next = (i + 1) % count;
-            std::array<Vertex, 4> patch{inner[i], outer[i], outer[next], inner[next]};
+        auto outer = roundedFeatherContour(x, 0.f, w, length, radius, spread * t);
+        for (size_t i = 0; i < inner.size(); ++i) {
+            size_t next = (i + 1) % inner.size();
+            std::array<Vertex, 4> patch{{{inner[i], innerAlpha}, {outer[i], feather},
+                                         {outer[next], feather}, {inner[next], innerAlpha}}};
             std::array<Vertex, 6> first, clipped;
             size_t size = clip(patch, first, -position, true);
             size = clip(std::span(first).first(size), clipped, trackHeight - position, false);
@@ -1238,6 +1264,7 @@ static void paintNoteGlow(CCDrawNode* glow, Look const& look, ccColor3B color, f
             appendNotePolygon(glow, std::span(vertices).first(size));
         }
         inner = outer;
+        innerAlpha = feather;
     }
 }
 
@@ -5010,6 +5037,10 @@ protected:
         statToggle(metric, "Side-by-side text", "stat-inline", true);
         statColor(metric, "Background color", "background", -1);
         statSlider(metric, "Idle opacity", "tile-opacity", 0.f, 255.f, 1.f, base.tileOpacity);
+        statToggle(metric, "Box shadow", "key-shadow", false);
+        statSlider(metric, "Shadow distance", "key-shadow-depth", 0.f, 18.f, 1.f, 4.f);
+        statSlider(metric, "Shadow opacity %", "key-shadow-opacity", 0.f, 100.f, 5.f, 46.f);
+        statColor(metric, "Shadow color", "key-shadow-color", 0, false);
         statSlider(metric, "Rounding %", "roundness", 0.f, 50.f, 1.f, 7.f);
         statColor(metric, "Border color", "rim", -1);
         statSlider(metric, "Border width", "rim-width", 0.f, 4.f, 0.25f, 0.f);

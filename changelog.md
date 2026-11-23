@@ -1,6 +1,7 @@
 # v1.0.9
 
 - Keep a single note continuous throughout a hold and let its tail leave the track after release.
+- Draw smooth key and statistics box shadows with editable shadow controls for the Total and KPS boxes.
 
 # v1.0.8
 
