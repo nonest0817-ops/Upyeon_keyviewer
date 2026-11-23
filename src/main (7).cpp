@@ -3046,7 +3046,15 @@ protected:
         if (state.language != current.language) mod->setSettingValue<std::string>("language", state.language);
         if (state.theme != current.theme) mod->setSettingValue<std::string>("editor-theme", state.theme);
         m_reloadLanguage = state.language != current.language || state.theme != current.theme;
-        refreshAll(true);
+        m_viewer->applyLook();
+        ensureSelection();
+        auto items = canvasItems();
+        std::erase_if(m_group, [&](CanvasItem const& selected) {
+            return std::none_of(items.begin(), items.end(), [&](CanvasItem const& item) { return item.sameItem(selected); });
+        });
+        if (m_photoSelected && (!g_photo.texture || !g_photo.visible)) m_photoSelected = false;
+        redrawCanvas();
+        redrawChrome();
         redrawMapBar();
         m_pendingRebuild = true;
         auto saved = mod->saveData();
