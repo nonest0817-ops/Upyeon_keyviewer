@@ -965,10 +965,10 @@ struct GradientPreset {
 };
 
 static const std::array<GradientPreset, 8> kGradientPresets = {{
-    {.title = "Glacier Cyan", .color = 0x42e8f5, .tip = 0x37486d, .edge = 0xe6faff, .glow = 38.f,
-     .radius = 6.f, .fade = 1.1f, .rim = 91.f, .fadeStart = 0.f, .speed = 290.f,
+    {.title = "Glacier Cyan", .color = 0x42edf3, .tip = 0x4d8abb, .edge = 0xe6faff, .glow = 38.f,
+     .radius = 6.f, .fade = 0.8f, .rim = 91.f, .fadeStart = 70.f, .speed = 290.f,
      .width = 98.f, .trackGradient = true, .borderWidth = 1.15f,
-     .middle = GradientStop{0x43a5c2, 178, 0.52f}},
+     .middle = GradientStop{0x3bcce5, 246, 0.54f}},
     {"Cyan Flow", 0x00e5ff, 0x607da8, 0xccecff, 22.f, 4.f, 1.65f, 84.f, 0.f, 300.f, 100.f, true},
     {"Aurora Mint", 0x00c995, 0xacffdc, 0x64eac4, 75.f, 8.f},
     {"Ocean Blue", 0x1461ff, 0x9cecff, 0x7dd6ff, 100.f, 7.f},
