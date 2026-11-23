@@ -1631,7 +1631,10 @@ static void loadBackgroundPhoto() {
     g_photo.width = static_cast<float>(std::clamp(mod->getSavedValue<double>("photo-width", 150.), 10., 1000.));
     g_photo.height = static_cast<float>(std::clamp(mod->getSavedValue<double>("photo-height", 0.), 0., 1000.));
     g_photo.opacity = static_cast<float>(std::clamp(mod->getSavedValue<double>("photo-opacity", 100.), 0., 100.));
-    if (g_photo.file != "background-0" && g_photo.file != "background-1") return;
+    if (g_photo.file != "background-0" && g_photo.file != "background-1") {
+        g_photo.file.clear();
+        return;
+    }
     std::error_code ec;
     if (std::filesystem::file_size(photoPath(g_photo.file), ec) > kMaxPhotoBytes || ec) return;
     auto bytes = geode::utils::file::readBinary(photoPath(g_photo.file));
