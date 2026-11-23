@@ -1,3 +1,7 @@
+# v1.0.9
+
+- Keep a single note continuous throughout a hold and let its tail leave the track after release.
+
 # v1.0.8
 
 - Copy and paste selected keys from the keyboard or the editor.

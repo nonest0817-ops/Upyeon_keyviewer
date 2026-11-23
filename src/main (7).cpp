@@ -1157,6 +1157,8 @@ static ccColor4B noteVertexColor(ccColor3B color, float opacity) {
             static_cast<GLubyte>(std::lround(c.b * 255.f)), static_cast<GLubyte>(std::lround(c.a * 255.f))};
 }
 
+static constexpr float kMaxNoteRadius = 16.f;
+
 static float visibleNoteLength(float distance, float length, float trackHeight) {
     return std::clamp(trackHeight - distance, 0.f, length);
 }
@@ -1243,7 +1245,8 @@ static void paintNote(CCDrawNode* draw, CCDrawNode* glow, Look const& look, floa
                       float w, float length, float position, float trackHeight) {
     float visible = visibleNoteLength(position, length, trackHeight);
     if (visible < 0.05f) return;
-    const float radius = std::min(std::clamp(look.noteRadius * w, 0.f, 16.f), std::min(w, length) / 2.f);
+    const float radius = std::min(std::clamp(look.noteRadius * w, 0.f, kMaxNoteRadius), std::min(w, length) / 2.f);
+    const float gradientLength = std::min(length, trackHeight);
     const float rim = std::min({look.noteBorder, w * 0.25f, length * 0.25f});
     const float direction = look.reverseFlow ? -1.f : 1.f;
     auto quad = [origin, direction](CCDrawNode* target, float l0, float r0, float l1, float r1,
@@ -1276,13 +1279,13 @@ static void paintNote(CCDrawNode* draw, CCDrawNode* glow, Look const& look, floa
         for (int i = 1; i < 20; ++i) rows.push_back(visible * i / 20.f);
         for (int i = 0; i < colors.count; ++i) {
             float stop = stopPosition(colors, i);
-            rows.push_back(look.noteTrackGradient ? trackHeight * stop - position : length * stop);
+            rows.push_back(look.noteTrackGradient ? trackHeight * stop - position : gradientLength * stop);
         }
     }
     sortRows(rows, 0.f, visible);
     auto fillAt = [&](float y) {
         float travel = position + y;
-        float gradientPosition = look.noteTrackGradient ? travel / trackHeight : y / length;
+        float gradientPosition = look.noteTrackGradient ? travel / trackHeight : y / gradientLength;
         auto stop = gradientAt(colors, gradientPosition, kNoteOpacityCurve);
         auto shade = shadeNote(unpackC(stop.color), look.noteTravelShade, look.noteShadeStrength, travel / trackHeight);
         return noteVertexColor(shade, look.noteOpacity * (stop.alpha / 255.f) * noteFillFade(look, travel, trackHeight));
@@ -1333,13 +1336,15 @@ struct Note {
 struct NoteSpan { float distance; float length; };
 
 static NoteSpan noteSpan(Note const& note, Look const& look, double now, float trackHeight) {
-    const double fillTime = trackHeight / (static_cast<double>(look.noteSpeed) * look.holdLengthScale);
-    const double pressedUntil = note.end < 0. ? now : note.end;
-    const double tailStart = std::min(note.start + fillTime, pressedUntil);
-    float length = holdNoteLength(note.start, tailStart, look.noteSpeed, look.holdLengthScale, trackHeight);
-    if (look.fixedShortNotes && note.end >= 0. && note.end - note.start <= look.shortNoteTime)
+    const bool released = note.end >= 0.;
+    const double pressedUntil = released ? note.end : now;
+    // Let the leading corner pass the clip line, but keep the tail at the key until release.
+    float length = holdNoteLength(note.start, pressedUntil, look.noteSpeed, look.holdLengthScale,
+                                  trackHeight + kMaxNoteRadius);
+    if (look.fixedShortNotes && released && note.end - note.start <= look.shortNoteTime)
         length = std::max(length, look.shortNoteLength);
-    return {static_cast<float>(std::max(0., now - tailStart) * look.noteSpeed), length};
+    float distance = static_cast<float>(std::max(0., now - pressedUntil) * look.noteSpeed);
+    return {distance, length};
 }
 
 // ---------------------------------------------------------------
@@ -1641,11 +1646,10 @@ public:
             float space = m_look.reverseFlow ? availableBelow - m_look.noteBaseGap : m_noteSpace - m_noteStart;
             H = std::clamp(space, 0.f, H);
         }
-        if (H <= 0.f) {
-            clearNotes();
-            return;
-        }
-        std::erase_if(m_notes, [&](Note const& note) { return noteSpan(note, m_look, now, H).distance >= H; });
+        std::erase_if(m_notes, [&](Note const& note) {
+            return note.end >= 0. && (now - note.end) * m_look.noteSpeed >= H;
+        });
+        if (H <= 0.f) return;
 
         float nw = std::max(2.f, m_look.noteWidth * m_w);
         float x = (m_w - nw) / 2.f;
