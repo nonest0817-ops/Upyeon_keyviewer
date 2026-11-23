@@ -1,6 +1,6 @@
 # Key Viewer
 
-Geometry Dash 2.2081 · Geode 5.9.0 · v1.0.4
+Geometry Dash 2.2081 · Geode 5.9.0 · v1.0.5
 
 ## 한국어
 
@@ -10,7 +10,9 @@ Geometry Dash 2.2081 · Geode 5.9.0 · v1.0.4
 - **키 → 키보드 키 지정**에서 키를 지정하면 그 물리 키의 누름과 뗌에만 반응합니다. **2P 전용**을 켜면 게임 동작은 2P 입력만 표시하고, 직접 지정한 키는 2P 모드에서만 활성화됩니다. 숫자 칸 위에서 마우스 휠을 돌려 값을 조절합니다. 터치 환경에서는 칸의 왼쪽과 오른쪽을 눌러 값을 낮추거나 높입니다.
 - **노트 → 그라데이션 편집**을 열어 막대 왼쪽의 아래쪽 색과 오른쪽의 사라지는 끝 색을 고릅니다. 색상 선택 영역, 색상 띠, 투명도 띠로 각 끝을 조절하고 **색 적용**을 누르세요.
 - **통계** 탭에서 KPS, 합계, 최고 KPS 박스를 각각 꾸밉니다. 기본값은 KPS와 합계의 가로 배치입니다. 위치를 드래그하면 직접 배치로 전환됩니다.
-- **프리셋** 탭에서 오로라 민트, 오션 블루, 펄스 바이올렛, 선셋 코랄, 레드 네온, 실버 미스트를 선택할 수 있습니다. 저장하거나 적용하는 대상은 선택한 키 하나입니다.
+- **프리셋** 탭에서 시안 플로우, 오로라 민트, 오션 블루, 펄스 바이올렛, 선셋 코랄, 레드 네온, 실버 미스트를 선택할 수 있습니다. 저장하거나 적용하는 대상은 선택한 키 하나입니다.
+- **보기 → 사진 불러오기**에서 PNG 또는 JPEG를 선택해 키 뒤에 놓습니다. 사진의 크기, 위치와 투명도를 조절할 수 있으며 높이를 0으로 두면 원본 비율을 유지합니다.
+- **키 → 키 이름 편집**에서 이름을 비워 저장하면 키 이름이 숨겨집니다. **자동 이름으로 복원**을 누르면 매핑에 따른 이름이 다시 표시됩니다.
 - **배치** 모드에서 실제 레벨을 배경으로 위치를 조절할 수 있습니다.
 
 ## 확대와 노트 도구
@@ -19,11 +21,11 @@ Geometry Dash 2.2081 · Geode 5.9.0 · v1.0.4
 
 하단 **도구**의 **노트** 탭에서 표시 프레임 제한, 속도, 트랙 높이, 방향과 페이드를 조절합니다. **고급** 탭에서는 짧은 입력을 판단하는 시간, 짧은 노트의 최소 길이, 키 표시 지연을 지정합니다. 지연 자동 계산은 현재 트랙 높이를 속도로 나눈 값을 사용합니다. **저장**을 눌러 선택한 키에 적용하세요.
 
-**키** 탭의 그림자와 입체 효과는 키마다 켜고 끌 수 있습니다. **그라데이션 편집**에서는 아래쪽과 사라지는 끝 버튼으로 각각을 선택하고, 위쪽 띠의 색점을 끌어 위치를 옮깁니다. 아래 투명도 띠를 끌거나 휠로 선택한 색점의 투명도를 조절합니다. **이동 중 밝기**에서는 노트가 진행 방향을 따라 밝아지거나 어두워지게 설정할 수 있습니다. 노트는 앞쪽 끝이 트랙 끝에 닿을 때 사라집니다.
+**키** 탭의 그림자와 입체 효과는 키마다 켜고 끌 수 있습니다. **그라데이션 편집**에서는 아래쪽과 사라지는 끝 버튼으로 각각을 선택하고, 위쪽 띠의 색점을 끌어 위치를 옮깁니다. 아래 투명도 띠를 끌거나 휠로 선택한 색점의 투명도를 조절합니다. **이동 중 밝기**에서는 노트가 진행 방향을 따라 밝아지거나 어두워지게 설정할 수 있습니다. 노트는 트랙 끝에서 앞부분부터 잘리며, 뒤쪽 끝이 트랙 끝을 통과할 때 사라집니다. 영상의 시안색 채움과 밝은 테두리는 **프리셋 → 시안 플로우**로 적용할 수 있습니다.
 
 ## English
 
-Open **Key Viewer** from the pause menu. Use the title-bar button to switch between light and dark. Select a key or statistics tile on the canvas to move or resize it. Hover over a numeric field and scroll to adjust it. On touch screens, tap the left or right half of the field. In **Note → Edit gradient**, select either stop to adjust its color and opacity.
+Open **Key Viewer** from the pause menu. Use the title-bar button to switch between light and dark. Select a key or statistics tile on the canvas to move or resize it. Hover over a numeric field and scroll to adjust it. On touch screens, tap the left or right half of the field. In **Note → Edit gradient**, select either stop to adjust its color and opacity. Apply **Cyan Flow** from the **Sets** tab for a bright cyan fill, pale outline, and a fade along the track. Choose a PNG or JPEG under **View → Choose photo** to add an adjustable image behind the keys. Save a blank key name to hide the label.
 
 ## Build
 

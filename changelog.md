@@ -1,3 +1,11 @@
+# v1.0.5
+
+- Render a continuous note gradient with vertex colors, and clip notes at the end of the track as they exit.
+- Add the Cyan Flow preset based on the reference video.
+- Keep editable key names blank when saved empty.
+- Add a resizable PNG or JPEG background behind the keys with position and opacity controls.
+- Refresh the light and dark editor surfaces and navigation.
+
 # v1.0.4
 
 - Use Geode keyboard events to capture and play exclusively mapped physical keys.

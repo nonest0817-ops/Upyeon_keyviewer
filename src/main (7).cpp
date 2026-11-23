@@ -6,6 +6,8 @@
 #include <Geode/ui/TextInput.hpp>
 #include <Geode/utils/cocos.hpp>
 #include <Geode/utils/Keyboard.hpp>
+#include <Geode/utils/async.hpp>
+#include <Geode/utils/file.hpp>
 #include <array>
 #include <set>
 #include <algorithm>
@@ -283,27 +285,6 @@ static ccColor3B shadeNote(ccColor3B color, int mode, float strength, float prog
     return color;
 }
 
-// Draw one continuous, full-width fill. Its geometry has no sliced texture regions.
-static void drawNoteRamp(CCDrawNode* draw, GradientStops const& colors, float x, float y,
-                         float w, float h, float rounding, float opacity, bool reverse,
-                         int brightness = 0, float strength = 0.f, float travel = 0.f, float travelSpan = 0.f) {
-    float radius = std::clamp(rounding, 0.f, std::min(w, h) * 0.5f);
-    int slices = std::clamp(static_cast<int>(std::ceil(h * 0.75f)), 12, 48);
-    for (int i = 0; i < slices; ++i) {
-        float t0 = static_cast<float>(i) / slices, t1 = static_cast<float>(i + 1) / slices;
-        float y0 = h * t0, y1 = h * t1;
-        float i0 = cornerInset(y0, h, radius), i1 = cornerInset(y1, h, radius);
-        float t = (t0 + t1) / 2.f;
-        float along = reverse ? 1.f - t : t;
-        auto stop = gradientAt(colors, along, kNoteOpacityCurve);
-        if (stop.alpha == 0) continue;
-        CCPoint quad[] = {{x + i0, y + y0}, {x + w - i0, y + y0},
-                         {x + w - i1, y + y1}, {x + i1, y + y1}};
-        auto color = premulC(shadeNote(unpackC(stop.color), brightness, strength, travel + along * travelSpan), opacity * stop.alpha / 255.f);
-        draw->drawPolygon(quad, 4, color, 0.f, color);
-    }
-}
-
 struct Look {
     float size = 44.f;
     float radius = 0.16f; // 박스 크기 대비 모서리 비율
@@ -476,6 +457,7 @@ static StyleValues decodeStyle(std::string const& encoded) {
 struct KeyDef {
     StyleValues style;
     std::string text;
+    bool customName = false;
     int id = 0;
     int map = 0;
     float x = 0.f, y = 0.f;      // 키뷰어 기준 왼쪽 아래 위치
@@ -519,6 +501,7 @@ static void saveKeyList() {
 static void saveKey(KeyDef const& k) {
     auto m = Mod::get();
     m->setSavedValue<std::string>(kf(k.id, "text"), k.text);
+    m->setSavedValue<bool>(kf(k.id, "custom-name"), k.customName);
     m->setSavedValue<std::string>(kf(k.id, "style"), encodeStyle(k.style));
     m->setSavedValue<int64_t>(kf(k.id, "map"), k.map);
     m->setSavedValue<double>(kf(k.id, "x"), k.x);
@@ -539,6 +522,7 @@ static KeyDef loadKey(int id) {
     KeyDef k;
     k.id = id;
     k.text = m->getSavedValue<std::string>(kf(id, "text"), "");
+    k.customName = m->getSavedValue<bool>(kf(id, "custom-name"), !k.text.empty());
     k.style = decodeStyle(m->getSavedValue<std::string>(kf(id, "style"), ""));
     k.map = static_cast<int>(m->getSavedValue<int64_t>(kf(id, "map"), 0));
     k.x = static_cast<float>(m->getSavedValue<double>(kf(id, "x"), 0.0));
@@ -735,7 +719,7 @@ static std::string keyName(int code) {
 }
 
 static std::string labelFor(KeyDef const& k, Look const& l) {
-    if (!k.text.empty()) return k.text;
+    if (k.customName) return k.text;
     if (k.label > 0 && k.label < kLabelCount) return kLabels[k.label];
     if (auto it = k.style.find("key-code"); it != k.style.end() && it->second > 0)
         return keyName(static_cast<int>(std::clamp(it->second, 1., 65535.)));
@@ -914,9 +898,15 @@ struct GradientPreset {
     int edge;
     float glow;
     float radius;
+    float fade = 0.85f;
+    float rim = 48.f;
+    float fadeStart = -1.f;
+    float speed = 265.f;
+    float width = 90.f;
 };
 
-static const std::array<GradientPreset, 6> kGradientPresets = {{
+static const std::array<GradientPreset, 7> kGradientPresets = {{
+    {"Cyan Flow", 0x00e5ff, 0x607da8, 0xccecff, 0.f, 4.f, 1.65f, 84.f, 0.f, 300.f, 100.f},
     {"Aurora Mint", 0x00c995, 0xacffdc, 0x64eac4, 75.f, 8.f},
     {"Ocean Blue", 0x1461ff, 0x9cecff, 0x7dd6ff, 100.f, 7.f},
     {"Pulse Violet", 0x6e39e4, 0xf1bfff, 0xbe9afa, 105.f, 8.f},
@@ -935,13 +925,14 @@ static std::string builtInGradientPreset(GradientPreset const& profile) {
         {"show-timeline", 1.}, {"note-gradient-enabled", 1.},
         {"note-gradient-bottom", double(profile.color)}, {"gradient-bottom-alpha", 255.},
         {"note-gradient-top", double(profile.tip)}, {"gradient-top-alpha", 0.},
-        {"note-width", 90.}, {"note-opacity", 100.}, {"note-speed", 265.},
-        {"note-fade", 0.85}, {"note-radius", double(profile.radius)},
-        {"note-border", 0.65}, {"note-border-color", double(profile.edge)}, {"note-rim-opacity", 48.},
+        {"note-width", profile.width}, {"note-opacity", 100.}, {"note-speed", profile.speed},
+        {"note-fade", profile.fade}, {"note-radius", profile.radius},
+        {"note-border", 0.85}, {"note-border-color", double(profile.edge)}, {"note-rim-opacity", profile.rim},
         {"note-glow", profile.glow > 0.f ? 1. : 0.}, {"note-glow-custom", 1.},
         {"note-glow-color", double(profile.color)}, {"note-glow-strength", double(profile.glow)},
         {"note-glow-size", 70.}, {"tile-opacity", 238.}, {"show-glow", 0.}
     };
+    if (profile.fadeStart >= 0.f) key.style["fade-start"] = profile.fadeStart;
     return keyStyleRecord(key, 'A');
 }
 
@@ -1054,76 +1045,141 @@ static void drawKeyDepth(CCDrawNode* under, CCDrawNode* rim, Look const& look,
     }
 }
 
-struct NoteSprites {
-    CCScale9Sprite* glow = nullptr;
-    CCScale9Sprite* base = nullptr;
-
-    void hide() const {
-        if (glow) glow->setVisible(false);
-        if (base) base->setVisible(false);
-    }
-};
-
-static NoteSprites createNoteSprites(CCNode* parent) {
-    NoteSprites s;
-    s.glow = CCScale9Sprite::create("kv_glow.png"_spr);
-    s.base = CCScale9Sprite::create("kv_solid.png"_spr);
-    if (!s.glow || !s.base) return {};
-    parent->addChild(s.glow, 0);
-    parent->addChild(s.base, 1);
-    s.hide();
-    return s;
-}
-
 static float holdNoteLength(double start, double end, float speed, float scale, float available) {
     return std::clamp(static_cast<float>(std::max(0.0, end - start) * speed * scale),
                       0.f, std::max(0.f, available));
 }
 
-static float noteSpriteScale(float radius, float width, float length) {
-    return std::min({std::max(0.04f, radius / kBaseR), width / kCap, length / kCap});
+// CCDrawNode batches the triangles. Use its allocator for capacity, then append
+// shared, individually colored vertices so no internal edge gets an AA fringe.
+static void noteQuad(CCDrawNode* draw, CCPoint a, CCPoint b, CCPoint c, CCPoint d, ccColor4B low, ccColor4B high) {
+    auto previous = draw->m_nBufferCount;
+    if (static_cast<unsigned>(previous + 6) > draw->m_uBufferCapacity) {
+        CCPoint reserve[] = {{0.f, 0.f}, {1.f, 0.f}, {1.f, 1.f}, {0.f, 1.f}};
+        constexpr ccColor4F opaque{1.f, 1.f, 1.f, 1.f};
+        draw->drawPolygon(reserve, 4, opaque, 0.f, opaque);
+        draw->m_nBufferCount = previous;
+        if (static_cast<unsigned>(previous + 6) > draw->m_uBufferCapacity) return;
+    }
+    auto vertex = [](CCPoint point, ccColor4B color) -> ccV2F_C4B_T2F {
+        return {{point.x, point.y}, color, {0.f, 0.f}};
+    };
+    auto va = vertex(a, low), vb = vertex(b, low), vc = vertex(c, high), vd = vertex(d, high);
+    auto out = draw->m_pBuffer + previous;
+    out[0] = va; out[1] = vb; out[2] = vc;
+    out[3] = va; out[4] = vc; out[5] = vd;
+    draw->m_nBufferCount = previous + 6;
+    draw->m_bDirty = true;
 }
 
-static void sizeNote(NoteSprites const& s, float w, float h, float rounding, float glowScale) {
-    float pad = kGlowPad * glowScale;
-    fitSize(s.base, w, h, rounding);
-    fitSize(s.glow, w + 2 * pad, h + 2 * pad, glowScale);
+static ccColor4B noteVertexColor(ccColor3B color, float opacity) {
+    auto c = premulC(color, opacity);
+    return {static_cast<GLubyte>(std::lround(c.r * 255.f)), static_cast<GLubyte>(std::lround(c.g * 255.f)),
+            static_cast<GLubyte>(std::lround(c.b * 255.f)), static_cast<GLubyte>(std::lround(c.a * 255.f))};
 }
 
-static void paintNote(NoteSprites const& s, CCDrawNode* fill, CCDrawNode* border, Look const& look,
-                      float x, float y, float w, float h, float rounding, float glowScale, float fade,
-                      float position, float trackHeight) {
-    float pad = kGlowPad * glowScale;
-    float opacity = std::clamp(look.noteOpacity, 0.05f, 1.f) * fade;
-    auto accent = look.accentJump;
-    bool ramp = look.gradNotes || look.noteTravelShade != 0;
-    s.base->setVisible(!ramp);
-    if (ramp) {
-        GradientStops colors = look.gradNotes ? look.noteGradient :
-            GradientStops{{{packC(accent), 255}, {packC(accent), 255}}};
-        drawNoteRamp(fill, colors, x, y, w, h, rounding * kBaseR, opacity, look.reverseFlow,
-                     look.noteTravelShade, look.noteShadeStrength, position / trackHeight, h / trackHeight);
-    } else {
-        placeCenter(s.base, x, y, w, h);
-        s.base->setColor(accent);
-        setOp(s.base, opacity);
+static float visibleNoteLength(float distance, float length, float trackHeight) {
+    return std::clamp(trackHeight - distance, 0.f, length);
+}
+
+static float noteFillFade(Look const& look, float position, float trackHeight) {
+    float progress = std::max(0.f, (position / trackHeight - look.fadeStart) / (1.f - look.fadeStart));
+    return timelineFade(progress, look.noteFade, look.gradNotes);
+}
+
+static void paintNote(CCDrawNode* draw, CCDrawNode* glow, Look const& look, float x, float origin,
+                      float w, float length, float position, float trackHeight) {
+    float visible = visibleNoteLength(position, length, trackHeight);
+    if (visible < 0.05f) return;
+    const float radius = std::min(std::clamp(look.noteRadius * w, 0.f, 16.f), std::min(w, length) / 2.f);
+    const float rim = std::min({look.noteBorder, w * 0.25f, length * 0.25f});
+    const float direction = look.reverseFlow ? -1.f : 1.f;
+    auto quad = [origin, direction](CCDrawNode* target, float l0, float r0, float l1, float r1,
+                                     float low, float high, ccColor4B a, ccColor4B b) {
+        float y0 = origin + direction * low, y1 = origin + direction * high;
+        if (direction > 0.f)
+            noteQuad(target, {l0, y0}, {r0, y0}, {r1, y1}, {l1, y1}, a, b);
+        else
+            noteQuad(target, {l1, y1}, {r1, y1}, {r0, y0}, {l0, y0}, b, a);
+    };
+    auto addCorners = [](std::vector<float>& rows, float bottom, float top, float r) {
+        for (int i = 0; i <= 4; ++i) {
+            float offset = r * (1.f - std::cos(i * kPi / 8.f));
+            rows.push_back(bottom + offset);
+            rows.push_back(top - offset);
+        }
+    };
+    auto sortRows = [](std::vector<float>& rows, float low, float high) {
+        for (float& y : rows) y = std::clamp(y, low, high);
+        std::sort(rows.begin(), rows.end());
+        rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
+    };
+    auto colors = look.noteGradient;
+    if (!look.gradNotes) colors = {{{packC(look.accentJump), 255}, {packC(look.accentJump), 255}}};
+    std::vector<float> rows{0.f, visible};
+    rows.reserve(44);
+    addCorners(rows, 0.f, length, radius);
+    if (rim > 0.f) addCorners(rows, rim, length - rim, std::max(0.f, radius - rim));
+    if (look.gradNotes || look.noteTravelShade || look.noteFade > 0.f) {
+        for (int i = 1; i < 20; ++i) rows.push_back(visible * i / 20.f);
+        for (int i = 0; i < 2; ++i) rows.push_back(length * stopPosition(colors, i));
+    }
+    sortRows(rows, 0.f, visible);
+    auto fillAt = [&](float y) {
+        auto stop = gradientAt(colors, y / length, kNoteOpacityCurve);
+        float travel = position + y;
+        auto shade = shadeNote(unpackC(stop.color), look.noteTravelShade, look.noteShadeStrength, travel / trackHeight);
+        return noteVertexColor(shade, look.noteOpacity * (stop.alpha / 255.f) * noteFillFade(look, travel, trackHeight));
+    };
+    auto rimAt = [&](float y) {
+        // Keep the outline legible until the last part of the note reaches the cut.
+        float tail = std::clamp((trackHeight - position - y) / (trackHeight * 0.07f), 0.f, 1.f);
+        return noteVertexColor(look.noteBorderColor, look.noteOpacity * look.noteRimAlpha * (0.76f + 0.24f * tail));
+    };
+    auto interval = [&](float low, float high, auto emit) {
+        for (size_t i = 1; i < rows.size(); ++i) {
+            float a = rows[i - 1], b = rows[i];
+            if (b - a < 0.0001f || a < low || b > high) continue;
+            emit(a, b);
+        }
+    };
+    interval(0.f, visible, [&](float a, float b) {
+        float ia = cornerInset(a, length, radius), ib = cornerInset(b, length, radius);
+        quad(draw, x + ia, x + w - ia, x + ib, x + w - ib, a, b, fillAt(a), fillAt(b));
+    });
+    if (rim > 0.f && look.noteRimAlpha > 0.f) {
+        interval(0.f, visible, [&](float a, float b) {
+            float aOuter = cornerInset(a, length, radius), bOuter = cornerInset(b, length, radius);
+            auto ca = rimAt(a), cb = rimAt(b);
+            if (a < rim || a >= length - rim) {
+                quad(draw, x + aOuter, x + w - aOuter, x + bOuter, x + w - bOuter, a, b, ca, cb);
+            } else {
+                float innerRadius = std::max(0.f, radius - rim);
+                float aInner = rim + cornerInset(a - rim, length - 2.f * rim, innerRadius);
+                float bInner = rim + cornerInset(b - rim, length - 2.f * rim, innerRadius);
+                quad(draw, x + aOuter, x + aInner, x + bOuter, x + bInner, a, b, ca, cb);
+                quad(draw, x + w - aInner, x + w - aOuter, x + w - bInner, x + w - bOuter, a, b, ca, cb);
+            }
+        });
     }
 
-    bool glow = look.noteGlow && look.glowStrength > 0.01f;
-    s.glow->setVisible(glow);
-    if (glow) {
-        auto color = look.glowCustom ? look.glowColor : look.gradNotes ? unpackC(look.noteGradient[0].color) : accent;
-        color = shadeNote(color, look.noteTravelShade, look.noteShadeStrength, position / trackHeight);
-        placeCenter(s.glow, x - pad, y - pad, w + 2 * pad, h + 2 * pad);
-        s.glow->setColor(color);
-        float visible = look.gradNotes ? (look.noteGradient[0].alpha + look.noteGradient[1].alpha) / 510.f : 1.f;
-        setOp(s.glow, 0.45f * look.glowStrength * fade * visible);
-    }
-
-    if (look.noteBorder > 0.f) {
-        float thickness = std::min(look.noteBorder, h * 0.28f);
-        dnStrokeA(border, x, y, x + w, y + h, rounding * kBaseR, look.noteBorderColor,
-                  thickness, opacity * look.noteRimAlpha, 4);
+    if (!look.noteGlow || look.glowStrength <= 0.f) return;
+    auto color = look.glowCustom ? look.glowColor : unpackC(colors[0].color);
+    float spread = 9.f * look.glowSize;
+    float alpha = look.glowStrength * look.noteOpacity * (colors[0].alpha / 255.f) * 0.13f;
+    for (int layer = 3; layer > 0; --layer) {
+        float pad = spread * layer / 3.f;
+        float low = std::max(-pad, -position), high = std::min(length + pad, trackHeight - position);
+        rows.assign({low, high});
+        addCorners(rows, -pad, length + pad, radius + pad);
+        sortRows(rows, low, high);
+        interval(low, high, [&](float a, float b) {
+            float ia = cornerInset(a + pad, length + 2.f * pad, radius + pad);
+            float ib = cornerInset(b + pad, length + 2.f * pad, radius + pad);
+            auto ca = noteVertexColor(color, alpha * noteFillFade(look, position + a, trackHeight));
+            auto cb = noteVertexColor(color, alpha * noteFillFade(look, position + b, trackHeight));
+            quad(glow, x - pad + ia, x + w + pad - ia, x - pad + ib, x + w + pad - ib, a, b, ca, cb);
+        });
     }
 }
 
@@ -1131,8 +1187,6 @@ struct Note {
     int source = 0;
     double start = 0.0;
     double end = -1.0; // 아직 누르는 중이면 -1
-    NoteSprites sp;
-    float lw = -1.f, lh = -1.f, ls = -1.f, lg = -1.f; // 마지막으로 적용한 크기 (불필요한 재계산 방지)
 };
 
 // ---------------------------------------------------------------
@@ -1157,11 +1211,10 @@ protected:
     CCScale9Sprite* m_tileGrad = nullptr;
     CCDrawNode* m_border = nullptr;
     CCNode* m_noteLayer = nullptr;
-    CCDrawNode* m_noteBorder = nullptr;
+    CCDrawNode* m_noteGlow = nullptr;
     CCLabelBMFont* m_name = nullptr;
     CCLabelBMFont* m_count = nullptr;
     std::deque<Note> m_notes;
-    std::vector<NoteSprites> m_pool;
     CCDrawNode* m_noteFill = nullptr;
     CCDrawNode* m_keyUnder = nullptr;
     CCDrawNode* m_keyRim = nullptr;
@@ -1182,8 +1235,8 @@ protected:
         this->addChild(m_noteLayer, -1);
         m_noteFill = CCDrawNode::create();
         m_noteLayer->addChild(m_noteFill, 2);
-        m_noteBorder = CCDrawNode::create();
-        m_noteLayer->addChild(m_noteBorder, 5);
+        m_noteGlow = CCDrawNode::create();
+        m_noteLayer->addChild(m_noteGlow, 0);
         this->addChild(m_glow, -2);
         m_keyUnder = CCDrawNode::create();
         this->addChild(m_keyUnder, -1);
@@ -1196,6 +1249,7 @@ protected:
         this->addChild(m_border, 2);
 
         m_name = CCLabelBMFont::create(name.c_str(), hasHangul(name) ? "KeyNames.fnt"_spr : "InterBold.fnt"_spr);
+        m_name->setVisible(!name.empty());
         this->addChild(m_name, 3);
 
         m_count = CCLabelBMFont::create("0", "InterBold.fnt"_spr);
@@ -1209,21 +1263,6 @@ protected:
 
     ccColor3B accent() const {
         return m_look.accentJump; // 키마다 자신의 색으로 이미 정리되어 들어온다
-    }
-
-    NoteSprites acquire() {
-        if (!m_pool.empty()) {
-            auto s = m_pool.back();
-            m_pool.pop_back();
-            return s;
-        }
-        return createNoteSprites(m_noteLayer);
-    }
-
-    void release(NoteSprites const& s) {
-        if (!s.base) return;
-        s.hide();
-        m_pool.push_back(s);
     }
 
     void fitCount(double now = nowSec()) {
@@ -1331,6 +1370,7 @@ public:
     void setName(std::string const& name) {
         if (name == m_nameStr) return;
         m_nameStr = name;
+        m_name->setVisible(!name.empty());
         setFont(m_name, m_look.labelFont, hasHangul(name));
         m_name->setString(name.c_str());
     }
@@ -1389,7 +1429,6 @@ public:
                 Note n;
                 n.source = source;
                 n.start = t;
-                n.sp = acquire();
                 m_notes.push_back(n);
             }
         } else if (m_held & bit) {
@@ -1426,19 +1465,17 @@ public:
     }
 
     void clearNotes() {
-        for (auto& n : m_notes) this->release(n.sp);
         m_notes.clear();
-        m_noteBorder->clear();
+        m_noteGlow->clear();
         m_noteFill->clear();
     }
 
-    // 노트: 둥근 막대 + 부드러운 빛 번짐 + 선택형 테두리. 모두 이미지 한 장씩이라 선이 생기지 않는다
     void tickNotes(double now, float availableBelow) {
         if (m_look.noteFrameLimit > 0 && m_lastNoteFrame >= 0.0 &&
             now - m_lastNoteFrame < 1.0 / m_look.noteFrameLimit) return;
         m_lastNoteFrame = now;
         m_noteFill->clear();
-        m_noteBorder->clear();
+        m_noteGlow->clear();
         if (!m_look.timeline) {
             if (!m_notes.empty()) this->clearNotes();
             return;
@@ -1466,37 +1503,14 @@ public:
                 result = std::max(result, m_look.shortNoteLength);
             return result;
         };
-        std::erase_if(m_notes, [&](Note const& note) {
-            if (distance(note) + length(note) < H) return false;
-            this->release(note.sp);
-            return true;
-        });
+        std::erase_if(m_notes, [&](Note const& note) { return distance(note) >= H; });
 
-        float baseY = m_noteStart;
-        float nw = std::max(kCap, std::clamp(m_look.noteWidth, 0.2f, 1.f) * m_w);
-        float x0 = (m_w - nw) / 2.f;
-        float noteR = std::clamp(m_look.noteRadius * nw, 1.5f, 16.f);
-        float sg = std::clamp(m_look.glowSize, 0.3f, 3.f);
-        for (auto& n : m_notes) {
-            auto& s = n.sp;
-            if (!s.base) continue;
-
-            float yb = distance(n);
-            float len = length(n);
-            if (yb >= H || len < 0.05f) {
-                s.hide();
-                continue;
-            }
-            float fadeProgress = std::max(0.f, (yb / H - m_look.fadeStart) / (1.f - m_look.fadeStart));
-            float fade = timelineFade(fadeProgress, m_look.noteFade, m_look.gradNotes);
-            fade *= std::clamp((H - yb - len) / (0.10f * H), 0.f, 1.f);
-            float sN = noteSpriteScale(noteR, nw, len);
-            float py = m_look.reverseFlow ? -m_look.noteBaseGap - yb - len : baseY + yb;
-            if (n.lw != nw || n.lh != len || n.ls != sN || n.lg != sg) {
-                n.lw = nw; n.lh = len; n.ls = sN; n.lg = sg;
-                sizeNote(s, nw, len, sN, sg);
-            }
-            paintNote(s, m_noteFill, m_noteBorder, m_look, x0, py, nw, len, sN, sg, fade, yb, H);
+        float nw = std::max(2.f, m_look.noteWidth * m_w);
+        float x = (m_w - nw) / 2.f;
+        for (auto const& note : m_notes) {
+            float position = distance(note);
+            float y = m_look.reverseFlow ? -m_look.noteBaseGap - position : m_noteStart + position;
+            paintNote(m_noteFill, m_noteGlow, m_look, x, y, nw, length(note), position, H);
         }
     }
 
@@ -1571,10 +1585,99 @@ static Look statLook(Look const& base, int metric) {
     return result;
 }
 
+struct BackgroundPhoto {
+    Ref<CCTexture2D> texture;
+    std::string file;
+    bool loaded = false;
+    bool visible = true;
+    float x = 0.f, y = 0.f, width = 150.f, height = 0.f, opacity = 100.f;
+};
+
+static BackgroundPhoto g_photo;
+static constexpr std::uintmax_t kMaxPhotoBytes = 24 * 1024 * 1024;
+
+static std::filesystem::path photoPath(std::string const& file) {
+    return Mod::get()->getSaveDir() / file;
+}
+
+static CCTexture2D* decodePhoto(ByteVector& bytes) {
+    if (bytes.size() < 8 || bytes.size() > kMaxPhotoBytes) return nullptr;
+    constexpr std::array<unsigned char, 8> png{0x89, 'P', 'N', 'G', 13, 10, 26, 10};
+    bool isPng = std::equal(png.begin(), png.end(), bytes.begin());
+    bool isJpg = bytes[0] == 0xff && bytes[1] == 0xd8 && bytes[2] == 0xff;
+    if (!isPng && !isJpg) return nullptr;
+    CCImage image;
+    if (!image.initWithImageData(bytes.data(), static_cast<int>(bytes.size()), isPng ? CCImage::kFmtPng : CCImage::kFmtJpg))
+        return nullptr;
+    if (image.getWidth() <= 0 || image.getHeight() <= 0 || image.getWidth() > 4096 || image.getHeight() > 4096)
+        return nullptr;
+    auto texture = new CCTexture2D();
+    if (!texture->initWithImage(&image)) {
+        texture->release();
+        return nullptr;
+    }
+    texture->autorelease();
+    return texture;
+}
+
+static void loadBackgroundPhoto() {
+    if (g_photo.loaded) return;
+    g_photo.loaded = true;
+    auto mod = Mod::get();
+    g_photo.file = mod->getSavedValue<std::string>("photo-file", "");
+    g_photo.visible = mod->getSavedValue<bool>("photo-visible", true);
+    g_photo.x = static_cast<float>(std::clamp(mod->getSavedValue<double>("photo-x", 0.), -500., 500.));
+    g_photo.y = static_cast<float>(std::clamp(mod->getSavedValue<double>("photo-y", 0.), -300., 300.));
+    g_photo.width = static_cast<float>(std::clamp(mod->getSavedValue<double>("photo-width", 150.), 10., 1000.));
+    g_photo.height = static_cast<float>(std::clamp(mod->getSavedValue<double>("photo-height", 0.), 0., 1000.));
+    g_photo.opacity = static_cast<float>(std::clamp(mod->getSavedValue<double>("photo-opacity", 100.), 0., 100.));
+    if (g_photo.file != "background-0" && g_photo.file != "background-1") return;
+    std::error_code ec;
+    if (std::filesystem::file_size(photoPath(g_photo.file), ec) > kMaxPhotoBytes || ec) return;
+    auto bytes = geode::utils::file::readBinary(photoPath(g_photo.file));
+    if (bytes.isOk()) g_photo.texture = Ref<CCTexture2D>(decodePhoto(bytes.unwrap()));
+}
+
+static void saveBackgroundPhoto() {
+    auto mod = Mod::get();
+    mod->setSavedValue<std::string>("photo-file", g_photo.file);
+    mod->setSavedValue<bool>("photo-visible", g_photo.visible);
+    mod->setSavedValue<double>("photo-x", g_photo.x);
+    mod->setSavedValue<double>("photo-y", g_photo.y);
+    mod->setSavedValue<double>("photo-width", g_photo.width);
+    mod->setSavedValue<double>("photo-height", g_photo.height);
+    mod->setSavedValue<double>("photo-opacity", g_photo.opacity);
+}
+
+static void positionPhoto(CCNode* parent, CCSprite*& sprite, CCPoint center, float scale, bool enabled = true) {
+    auto texture = g_photo.texture.data();
+    if (!enabled || !g_photo.visible || !texture) {
+        if (sprite) {
+            sprite->removeFromParentAndCleanup(true);
+            sprite = nullptr;
+        }
+        return;
+    }
+    if (!sprite || sprite->getTexture() != texture) {
+        if (sprite) sprite->removeFromParentAndCleanup(true);
+        sprite = CCSprite::createWithTexture(texture);
+        if (!sprite) return;
+        parent->addChild(sprite, -10);
+    }
+    auto size = sprite->getContentSize();
+    if (size.width <= 0.f || size.height <= 0.f) return;
+    float stretch = g_photo.width / size.width;
+    sprite->setScaleX(stretch * scale);
+    sprite->setScaleY((g_photo.height > 0.f ? g_photo.height / size.height : stretch) * scale);
+    sprite->setPosition({center.x + g_photo.x * scale, center.y + g_photo.y * scale});
+    sprite->setOpacity(static_cast<GLubyte>(std::lround(g_photo.opacity * 2.55f)));
+}
+
 class KeyViewer : public CCLayer {
 protected:
     std::vector<LaneRef> m_lanes;
     std::vector<LaneGeo> m_geo;
+    CCSprite* m_photo = nullptr;
     std::array<KeyLane*, StatCount> m_stats{};
     std::vector<StatBox> m_statGeo;
     CCLabelBMFont* m_hint = nullptr;
@@ -1670,6 +1773,10 @@ public:
     }
 
     std::vector<LaneGeo> const& geo() const { return m_geo; }
+
+    CCPoint photoCenter() const { return {(m_minX + m_maxX) / 2.f, (m_minY + m_maxY) / 2.f}; }
+
+    void updatePhoto() { positionPhoto(this, m_photo, photoCenter(), 1.f); }
     float minX() const { return m_minX; }
     float maxX() const { return m_maxX; }
 
@@ -1804,6 +1911,7 @@ public:
 
     void applyLook() {
         loadKeys();
+        loadBackgroundPhoto();
         const bool wasVisible = m_look.viewerVisible;
         m_look = readLook();
         if (wasVisible && !m_look.viewerVisible) {
@@ -1846,6 +1954,7 @@ public:
             minX = -20.f; maxX = 20.f; minY = 0.f; maxY = m_look.size;
         }
         m_minX = minX; m_maxX = maxX; m_minY = minY; m_maxY = maxY;
+        updatePhoto();
 
         float cxm = (minX + maxX) / 2.f;
         m_hint->setPosition({cxm, maxY + 14.f});
@@ -2505,6 +2614,8 @@ protected:
     CCDrawNode* m_back = nullptr;
     CCDrawNode* m_chrome = nullptr;
     CCDrawNode* m_canvas = nullptr;
+    CCClippingNode* m_canvasClip = nullptr;
+    CCSprite* m_photoPreview = nullptr;
     CCDrawNode* m_bar = nullptr;
     CCDrawNode* m_mapChrome = nullptr;
     CCNode* m_canvasLabels = nullptr;
@@ -2542,12 +2653,12 @@ protected:
     CCDrawNode* m_zoomDraw = nullptr;
     CCLabelBMFont* m_zoomLabel = nullptr;
 
-    ccColor3B uiInk() const { return m_light ? ccColor3B{40, 48, 56} : ccColor3B{234, 237, 240}; }
-    ccColor3B uiMuted() const { return m_light ? ccColor3B{88, 97, 108} : ccColor3B{171, 179, 188}; }
-    ccColor3B uiAccent() const { return m_light ? ccColor3B{83, 99, 181} : ccColor3B{151, 162, 239}; }
-    ccColor3B uiField() const { return m_light ? ccColor3B{250, 251, 252} : ccColor3B{34, 40, 47}; }
-    ccColor3B uiLine() const { return m_light ? ccColor3B{175, 186, 197} : ccColor3B{79, 89, 102}; }
-    ccColor3B uiPanel() const { return m_light ? ccColor3B{246, 247, 249} : ccColor3B{29, 34, 39}; }
+    ccColor3B uiInk() const { return m_light ? ccColor3B{24, 39, 54} : ccColor3B{232, 239, 247}; }
+    ccColor3B uiMuted() const { return m_light ? ccColor3B{83, 102, 122} : ccColor3B{164, 182, 200}; }
+    ccColor3B uiAccent() const { return m_light ? ccColor3B{32, 94, 219} : ccColor3B{116, 172, 255}; }
+    ccColor3B uiField() const { return m_light ? ccColor3B{229, 237, 247} : ccColor3B{34, 49, 69}; }
+    ccColor3B uiLine() const { return m_light ? ccColor3B{170, 190, 212} : ccColor3B{64, 85, 111}; }
+    ccColor3B uiPanel() const { return m_light ? ccColor3B{248, 251, 255} : ccColor3B{23, 35, 53}; }
 
     bool init(KeyViewer* viewer) {
         if (!CCLayer::init()) return false;
@@ -2576,7 +2687,7 @@ protected:
         this->addChild(m_back, 0);
         m_chrome = CCDrawNode::create();
         this->addChild(m_chrome, 1);
-        auto canvasClip = CCClippingNode::create();
+        auto canvasClip = m_canvasClip = CCClippingNode::create();
         m_canvasStencil = CCDrawNode::create();
         canvasClip->setStencil(m_canvasStencil);
         this->addChild(canvasClip, 2);
@@ -2617,7 +2728,7 @@ protected:
         this->addChild(m_mapLabels, 8);
 
         // 제목과 닫기
-        mkLabel(m_winLabels, "KEY VIEWER", 0.40f, uiInk(), CCPoint(winX0 + 14.f, winY1 - 16.f), 0.f);
+        mkLabel(m_winLabels, "KEY VIEWER", 0.40f, uiInk(), CCPoint(winX0 + 26.f, winY1 - 16.f), 0.f);
         mkLabel(m_winLabels, m_light ? "Dark mode" : "Light mode", 0.26f, uiInk(),
                 CCPoint(winX1 - 72.f, winY1 - 16.f), 0.5f);
         {
@@ -3122,39 +3233,45 @@ protected:
 
     void redrawChrome() {
         m_chrome->clear();
-        auto frame = m_light ? ccColor3B{224, 230, 236} : ccColor3B{40, 47, 54};
-        auto canvas = m_light ? ccColor3B{222, 229, 235} : ccColor3B{20, 25, 30};
-        auto grid = m_light ? ccColor3B{104, 119, 138} : ccColor3B{102, 116, 131};
+        auto frame = m_light ? ccColor3B{228, 237, 247} : ccColor3B{15, 24, 38};
+        auto canvas = m_light ? ccColor3B{240, 246, 252} : ccColor3B{19, 31, 49};
+        auto grid = m_light ? ccColor3B{100, 136, 176} : ccColor3B{119, 154, 191};
         auto active = lerpC(uiField(), uiAccent(), m_light ? 0.16f : 0.33f);
-        dnRound(m_chrome, winX0, winY0, winX1, winY1, 8.f, frame, 1.f);
+        dnRound(m_chrome, winX0 - 2.f, winY0 - 2.f, winX1 + 2.f, winY1 + 1.f, 12.f, {8, 16, 26}, 0.32f);
+        dnRound(m_chrome, winX0, winY0, winX1, winY1, 11.f, frame);
         dnStrokeA(m_chrome, winX0 + 0.5f, winY0 + 0.5f, winX1 - 0.5f, winY1 - 0.5f,
-                  7.5f, uiLine(), 0.75f, 0.79f);
-        dnRect(m_chrome, winX0 + 6.f, winY1 - 31.5f, winX1 - 6.f, winY1 - 31.f, uiLine(), 0.78f);
+                  10.f, uiLine(), 0.65f, 0.78f);
+        dnRound(m_chrome, winX0 + 4.f, winY1 - 29.f, winX1 - 4.f, winY1 - 4.f, 8.f, uiPanel());
+        dnRound(m_chrome, winX0 + 13.f, winY1 - 20.f, winX0 + 20.f, winY1 - 12.f, 2.f, uiAccent());
+        dnRound(m_chrome, cvX0 - 2.f, tbY0 - 2.f, inX1 + 2.f, tbY1 + 2.f, 8.f, uiPanel());
         dnRound(m_chrome, winX1 - 110.f, winY1 - 25.f, winX1 - 35.f, winY1 - 7.f, 5.f, uiField());
         dnRound(m_chrome, winX1 - 31.f, winY1 - 25.f, winX1 - 13.f, winY1 - 7.f, 5.f, uiField());
 
         dnRound(m_chrome, cvX0, cvY0, cvX1, cvY1, 5.f, canvas, 1.f);
         for (int i = 1; cvX0 + i * 6.f < cvX1 - 2.f; ++i) {
             float x = cvX0 + i * 6.f;
-            dnRect(m_chrome, x, cvY0 + 2.f, x + 0.4f, cvY1 - 2.f, grid, i % 5 == 0 ? 0.28f : 0.12f);
+            dnRect(m_chrome, x, cvY0 + 2.f, x + 0.4f, cvY1 - 2.f, grid, i % 5 == 0 ? 0.25f : 0.095f);
         }
         for (int i = 1; cvY0 + i * 6.f < cvY1 - 2.f; ++i) {
             float y = cvY0 + i * 6.f;
-            dnRect(m_chrome, cvX0 + 2.f, y, cvX1 - 2.f, y + 0.4f, grid, i % 5 == 0 ? 0.28f : 0.12f);
+            dnRect(m_chrome, cvX0 + 2.f, y, cvX1 - 2.f, y + 0.4f, grid, i % 5 == 0 ? 0.25f : 0.095f);
         }
         dnRound(m_chrome, cvX0 + 2.f, cvY0 + 2.f, cvX1 - 2.f, cvY0 + 14.f, 3.f, uiPanel(), 0.95f);
         dnRound(m_chrome, inX0, inY0, inX1, inY1, 6.f, uiPanel(), 1.f);
         float tw = (inX1 - inX0 - 12.f) / 5.f;
+        dnRound(m_chrome, inX0 + 4.f, tabY0 - 1.f, inX1 - 4.f, inY1 - 2.f, 6.f, uiField());
         for (int i = 0; i < 5; ++i) {
             float x = inX0 + 6.f + i * tw;
-            dnRound(m_chrome, x + 1.f, tabY0, x + tw - 1.f, inY1 - 3.f, 5.f,
-                    i == m_tab ? active : uiField(), 1.f, 4);
+            if (i == m_tab) {
+                dnRound(m_chrome, x + 1.f, tabY0 + 1.f, x + tw - 1.f, inY1 - 4.f, 5.f, active);
+                dnRound(m_chrome, x + tw * 0.31f, tabY0 + 1.f, x + tw * 0.69f, tabY0 + 2.3f, 0.55f, uiAccent());
+            }
             if (m_tabLabels[i]) m_tabLabels[i]->setColor(i == m_tab ? uiInk() : uiMuted());
         }
 
         for (auto const& b : m_btns) {
             bool on = btnActive(b);
-            dnRound(m_chrome, b.x0, b.y0, b.x1, b.y1, 6.f, on ? active : uiField(), 1.f, 4);
+            dnRound(m_chrome, b.x0, b.y0, b.x1, b.y1, 6.f, on ? active : lerpC(uiPanel(), uiField(), 0.68f), 1.f, 4);
             if (on) dnStrokeA(m_chrome, b.x0 + 0.5f, b.y0 + 0.5f, b.x1 - 0.5f, b.y1 - 0.5f,
                               5.5f, uiAccent(), 0.8f, 0.63f, 4);
             if (b.id == 31 && b.x1 - b.x0 > 32.f) {
@@ -3198,28 +3315,21 @@ protected:
     }
 
     void drawNotePreview(Look const& look, float x, float y, float width, float zoom) {
-        float w = std::max(kCap, width * look.noteWidth);
-        float radius = std::clamp(look.noteRadius * w, 1.5f, 16.f);
-        float glow = std::clamp(look.glowSize, 0.3f, 3.f);
+        float w = std::max(2.f, width * look.noteWidth);
         auto sample = CCNode::create();
         auto fill = CCDrawNode::create();
-        auto border = CCDrawNode::create();
-        sample->addChild(fill, 2);
-        sample->addChild(border, 5);
+        auto glow = CCDrawNode::create();
+        sample->addChild(glow, 0);
+        sample->addChild(fill, 1);
         sample->setScale(zoom);
         sample->setPosition({x, y});
         m_notePreview->addChild(sample);
         float bottom = 0.f;
         for (double hold : {0.075, 0.032, 0.017}) {
-            float h = holdNoteLength(0.0, hold, look.noteSpeed, look.holdLengthScale, look.noteHeight - bottom);
-            if (h < 0.05f) break;
-            float rounding = noteSpriteScale(radius, w, h);
-            auto sprites = createNoteSprites(sample);
-            if (!sprites.base) break;
-            sizeNote(sprites, w, h, rounding, glow);
-            float fade = timelineFade(bottom / look.noteHeight, look.noteFade, look.gradNotes);
-            float y = look.reverseFlow ? -look.noteBaseGap - bottom - h : look.noteBaseGap + bottom;
-            paintNote(sprites, fill, border, look, (width - w) / 2.f, y, w, h, rounding, glow, fade, bottom, look.noteHeight);
+            float h = holdNoteLength(0.0, hold, look.noteSpeed, look.holdLengthScale, look.noteHeight);
+            float distance = look.noteBaseGap + bottom;
+            paintNote(fill, glow, look, (width - w) / 2.f, look.reverseFlow ? -distance : distance,
+                      w, h, bottom, look.noteHeight);
             bottom += h + 7.f;
         }
     }
@@ -3231,6 +3341,11 @@ protected:
         m_depthPreview->removeAllChildrenWithCleanup(true);
         if (!m_mapMode && m_dragMode == 0) updateFit();
         redrawMinimap();
+        auto transform = view();
+        auto center = m_viewer->photoCenter();
+        positionPhoto(m_canvasClip, m_photoPreview, {transform.ox + center.x * transform.sc,
+                                                     transform.oy + center.y * transform.sc},
+                      transform.sc, !m_mapMode || !m_viewer->isVisible());
         if (!m_mapMode || !m_viewer->isVisible()) {
             auto v = this->view();
             auto base = readLook();
@@ -3280,7 +3395,7 @@ protected:
 
             bool pressed = m_previewPressed;
             ccColor3B fill = pressed ? kl.pressed : kl.tile;
-            float a = pressed ? 1.f : std::max(0.55f, kl.tileOpacity / 255.f);
+            float a = pressed ? 1.f : kl.tileOpacity / 255.f;
             auto previewDepth = CCDrawNode::create();
             m_depthPreview->addChild(previewDepth, 2);
             drawKeyDepth(m_canvas, previewDepth, kl, x0, y0, w, h, v.sc, pressed ? 1.f : 0.f);
@@ -3290,7 +3405,7 @@ protected:
             // 선택한 키: 파란 테두리와 손잡이 (모서리 동그라미, 변 알약)
             if (g.id == m_sel && !(m_tab == 2 && m_statTab > 0)) drawSelection(m_canvas, x0, y0, x1, y1, r);
 
-            auto lab = this->tileLabel(li++);
+            auto lab = g.name.empty() ? nullptr : this->tileLabel(li++);
             if (lab) {
                 setFont(lab, kl.labelFont, hasHangul(g.name));
                 lab->setString(g.name.c_str());
@@ -3536,7 +3651,7 @@ protected:
         if (title) title->setScale(std::min(0.28f, (x - 4.f) / std::max(1.f, title->getContentSize().width)));
         auto draw = rowDraw(row);
         dnRound(draw, x, top - 23.5f, m_inW, top - 3.5f, 5.f, uiField());
-        dnStrokeA(draw, x + 0.5f, top - 23.f, m_inW - 0.5f, top - 4.f, 4.f, uiAccent(), 0.75f, 0.56f, 4);
+        dnStrokeA(draw, x + 0.5f, top - 23.f, m_inW - 0.5f, top - 4.f, 4.f, uiLine(), 0.60f, 0.62f, 4);
         wheelField(row, CCRect(x, top - 24.f, field, 22.f), "", min, max, step, std::move(get), std::move(set));
     }
 
@@ -3955,12 +4070,23 @@ protected:
                     if (!validName(name)) return false;
                     if (auto key = keyById(id)) {
                         key->text = name;
+                        key->customName = true;
                         key->label = 0;
                         commitKey(id);
                     }
                     return true;
                 });
         });
+        if (key->customName) {
+            rowButton("Restore automatic name", uiField(), [this, id] {
+                if (auto key = keyById(id)) {
+                    key->text.clear();
+                    key->customName = false;
+                    commitKey(id);
+                    m_pendingRebuild = true;
+                }
+            });
+        }
         int code = lookForKey(readLook(), *key).keyCode;
         rowInfo(code ? uiText("Bound key ") + keyName(code) : uiText("Game action input"));
         rowToggle("Player 2 only",
@@ -4203,7 +4329,110 @@ protected:
         setStatus("Aligned visible keys.");
     }
 
+    void refreshPhoto() {
+        saveBackgroundPhoto();
+        m_viewer->updatePhoto();
+        redrawCanvas();
+    }
+
+    void chooseBackgroundPhoto() {
+        using namespace geode::utils::file;
+        m_modal = true;
+        FilePickOptions options;
+        options.filters = {{uiText("Photo files (PNG, JPEG)"), {"*.png", "*.jpg", "*.jpeg"}}};
+        geode::async::spawn(pick(PickMode::OpenFile, std::move(options)),
+            [editor = Ref<KVEditor>(this)](PickResult result) {
+                if (!editor->getParent() || editor->m_closing) return;
+                editor->m_modal = false;
+                if (result.isErr()) {
+                    editor->setStatus("Could not open photo picker.");
+                    return;
+                }
+                auto path = result.unwrap();
+                if (!path) return;
+                std::error_code ec;
+                if (std::filesystem::file_size(*path, ec) > kMaxPhotoBytes || ec) {
+                    editor->setStatus("Use a PNG or JPEG up to 24 MB and 4096 px.");
+                    return;
+                }
+                auto bytes = readBinary(*path);
+                if (bytes.isErr()) {
+                    editor->setStatus("Could not read the photo.");
+                    return;
+                }
+                auto& image = bytes.unwrap();
+                auto texture = decodePhoto(image);
+                if (!texture) {
+                    editor->setStatus("Use a PNG or JPEG up to 24 MB and 4096 px.");
+                    return;
+                }
+                // Write the new image to the other slot before changing the active file.
+                std::string file = g_photo.file == "background-0" ? "background-1" : "background-0";
+                if (writeBinarySafe(photoPath(file), image).isErr()) {
+                    editor->setStatus("Could not store the photo.");
+                    return;
+                }
+                auto previous = g_photo;
+                g_photo.file = std::move(file);
+                g_photo.texture = Ref<CCTexture2D>(texture);
+                g_photo.visible = true;
+                saveBackgroundPhoto();
+                if (Mod::get()->saveData().isErr()) {
+                    g_photo = std::move(previous);
+                    saveBackgroundPhoto();
+                    editor->setStatus("Could not store the photo.");
+                    return;
+                }
+                if (!previous.file.empty()) std::filesystem::remove(photoPath(previous.file), ec);
+                editor->m_viewer->updatePhoto();
+                editor->redrawCanvas();
+                editor->m_pendingRebuild = true;
+                editor->setStatus("Background photo loaded.");
+            });
+    }
+
+    void buildPhotoControls() {
+        rowInfo("Background photo");
+        rowButton(g_photo.texture ? "Replace photo" : "Choose photo", lerpC(uiField(), uiAccent(), 0.18f),
+            [this] { chooseBackgroundPhoto(); });
+        if (!g_photo.texture) return;
+        rowToggle("Show photo", [] { return g_photo.visible; }, [this](bool show) {
+            g_photo.visible = show;
+            refreshPhoto();
+        });
+        auto adjust = [this](std::string const& label, float BackgroundPhoto::*field, float min, float max, float step) {
+            rowNumber(label, min, max, step, [field] { return g_photo.*field; }, [this, field](float value) {
+                g_photo.*field = value;
+                refreshPhoto();
+            });
+        };
+        adjust("Photo width", &BackgroundPhoto::width, 10.f, 1000.f, 5.f);
+        adjust("Photo height (0 = auto)", &BackgroundPhoto::height, 0.f, 1000.f, 5.f);
+        adjust("Photo position X", &BackgroundPhoto::x, -500.f, 500.f, 2.f);
+        adjust("Photo position Y", &BackgroundPhoto::y, -300.f, 300.f, 2.f);
+        adjust("Photo opacity %", &BackgroundPhoto::opacity, 0.f, 100.f, 5.f);
+        rowButton("Remove photo", uiField(), [this] {
+            auto previous = g_photo;
+            g_photo.file.clear();
+            g_photo.texture = Ref<CCTexture2D>();
+            saveBackgroundPhoto();
+            if (Mod::get()->saveData().isErr()) {
+                g_photo = std::move(previous);
+                saveBackgroundPhoto();
+                setStatus("Could not store the photo.");
+                return;
+            }
+            std::error_code ec;
+            std::filesystem::remove(photoPath(previous.file), ec);
+            m_viewer->updatePhoto();
+            redrawCanvas();
+            m_pendingRebuild = true;
+            setStatus("Background photo removed.");
+        });
+    }
+
     void buildViewTab() {
+        buildPhotoControls();
         rowChoice("Language", {"English", "Korean"},
             []() { return koreanUI() ? 1 : 0; },
             [this](int choice) {

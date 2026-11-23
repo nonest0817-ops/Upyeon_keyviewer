@@ -8,7 +8,7 @@ else()
 endif()
 set(CMAKE_CXX_VISIBILITY_PRESET hidden)
 
-project(KeyViewer VERSION 1.0.4)
+project(KeyViewer VERSION 1.0.5)
 
 if(MSVC)
     add_compile_options(/utf-8)
