@@ -1,3 +1,7 @@
+# v1.0.10
+
+- Fade the note fill, outline, and glow smoothly over the last fifth of the track.
+
 # v1.0.9
 
 - Keep a single note continuous throughout a hold and let its tail leave the track after release.

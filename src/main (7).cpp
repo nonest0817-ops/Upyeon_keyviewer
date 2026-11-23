@@ -1208,6 +1208,17 @@ static void drawKeyDepth(CCDrawNode* under, CCDrawNode* rim, Look const& look,
 }
 
 static constexpr float kMaxNoteRadius = 16.f;
+static constexpr float kNoteExitFadeFraction = 0.20f;
+static constexpr int kNoteExitFadeSteps = 8;
+
+static float noteExitFade(float position, float trackHeight) {
+    float remaining = std::clamp((trackHeight - position) / (trackHeight * kNoteExitFadeFraction), 0.f, 1.f);
+    return remaining * remaining * (3.f - 2.f * remaining);
+}
+
+static float noteExitFadeRow(float trackHeight, int step) {
+    return trackHeight * (1.f - kNoteExitFadeFraction * (1.f - static_cast<float>(step) / kNoteExitFadeSteps));
+}
 
 static float visibleNoteLength(float distance, float length, float trackHeight) {
     return std::clamp(trackHeight - distance, 0.f, length);
@@ -1242,6 +1253,9 @@ static void paintNoteGlow(CCDrawNode* glow, Look const& look, ccColor3B color, f
     float spread = 9.f * look.glowSize;
     float direction = look.reverseFlow ? -1.f : 1.f;
     float power = look.glowStrength * look.noteOpacity * opacity * 0.46f;
+    std::array<float, kNoteExitFadeSteps + 2> rows;
+    rows.front() = -position;
+    for (int i = 0; i <= kNoteExitFadeSteps; ++i) rows[i + 1] = noteExitFadeRow(trackHeight, i) - position;
     auto inner = roundedFeatherContour(x, 0.f, w, length, radius, -std::min({1.25f, w / 4.f, length / 4.f}));
     float innerAlpha = 0.f;
     for (int ring = 0; ring <= 6; ++ring) {
@@ -1252,16 +1266,23 @@ static void paintNoteGlow(CCDrawNode* glow, Look const& look, ccColor3B color, f
             size_t next = (i + 1) % inner.size();
             std::array<Vertex, 4> patch{{{inner[i], innerAlpha}, {outer[i], feather},
                                          {outer[next], feather}, {inner[next], innerAlpha}}};
-            std::array<Vertex, 6> first, clipped;
-            size_t size = clip(patch, first, -position, true);
-            size = clip(std::span(first).first(size), clipped, trackHeight - position, false);
-            std::array<ccV2F_C4B_T2F, 6> vertices;
-            for (size_t j = 0; j < size; ++j) {
-                auto v = clipped[look.reverseFlow ? size - 1 - j : j];
-                float alpha = power * v.alpha * noteFillFade(look, position + v.point.y, trackHeight);
-                vertices[j] = {{v.point.x, origin + direction * v.point.y}, noteVertexColor(color, alpha), {0.f, 0.f}};
+            auto [minY, maxY] = std::minmax({patch[0].point.y, patch[1].point.y, patch[2].point.y, patch[3].point.y});
+            for (size_t row = 1; row < rows.size(); ++row) {
+                if (rows[row - 1] >= maxY) break;
+                if (rows[row] <= minY) continue;
+                // Sample the same fade rows as the fill so long glow edges cannot fade early.
+                std::array<Vertex, 6> first, clipped;
+                size_t size = clip(patch, first, rows[row - 1], true);
+                size = clip(std::span(first).first(size), clipped, rows[row], false);
+                std::array<ccV2F_C4B_T2F, 6> vertices;
+                for (size_t j = 0; j < size; ++j) {
+                    auto v = clipped[look.reverseFlow ? size - 1 - j : j];
+                    float travel = position + v.point.y;
+                    float alpha = power * v.alpha * noteFillFade(look, travel, trackHeight) * noteExitFade(travel, trackHeight);
+                    vertices[j] = {{v.point.x, origin + direction * v.point.y}, noteVertexColor(color, alpha), {0.f, 0.f}};
+                }
+                appendNotePolygon(glow, std::span(vertices).first(size));
             }
-            appendNotePolygon(glow, std::span(vertices).first(size));
         }
         inner = outer;
         innerAlpha = feather;
@@ -1299,7 +1320,8 @@ static void paintNote(CCDrawNode* draw, CCDrawNode* glow, Look const& look, floa
     auto colors = look.noteGradient;
     if (!look.gradNotes) colors = {{{packC(look.accentJump), 255}, {packC(look.accentJump), 255}}};
     std::vector<float> rows{0.f, visible};
-    rows.reserve(46);
+    rows.reserve(46 + kNoteExitFadeSteps);
+    for (int i = 0; i < kNoteExitFadeSteps; ++i) rows.push_back(noteExitFadeRow(trackHeight, i) - position);
     addCorners(rows, 0.f, length, radius);
     if (rim > 0.f) addCorners(rows, rim, length - rim, std::max(0.f, radius - rim));
     if (look.gradNotes || look.noteTravelShade || look.noteFade > 0.f) {
@@ -1315,12 +1337,12 @@ static void paintNote(CCDrawNode* draw, CCDrawNode* glow, Look const& look, floa
         float gradientPosition = look.noteTrackGradient ? travel / trackHeight : y / gradientLength;
         auto stop = gradientAt(colors, gradientPosition, kNoteOpacityCurve);
         auto shade = shadeNote(unpackC(stop.color), look.noteTravelShade, look.noteShadeStrength, travel / trackHeight);
-        return noteVertexColor(shade, look.noteOpacity * (stop.alpha / 255.f) * noteFillFade(look, travel, trackHeight));
+        float opacity = look.noteOpacity * (stop.alpha / 255.f) * noteFillFade(look, travel, trackHeight);
+        return noteVertexColor(shade, opacity * noteExitFade(travel, trackHeight));
     };
     auto rimAt = [&](float y) {
-        // Keep the outline legible until the last part of the note reaches the cut.
-        float tail = std::clamp((trackHeight - position - y) / (trackHeight * 0.07f), 0.f, 1.f);
-        return noteVertexColor(look.noteBorderColor, look.noteOpacity * look.noteRimAlpha * (0.76f + 0.24f * tail));
+        float opacity = look.noteOpacity * look.noteRimAlpha * noteExitFade(position + y, trackHeight);
+        return noteVertexColor(look.noteBorderColor, opacity);
     };
     auto interval = [&](float low, float high, auto emit) {
         for (size_t i = 1; i < rows.size(); ++i) {
