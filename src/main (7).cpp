@@ -324,6 +324,8 @@ struct Look {
     bool gradTile = false;
     bool idleGradient = false;
     bool noteTrackGradient = false;
+    int noteGradientFlow = 0;
+    float noteGradientFlowSpeed = 0.60f;
     int noteTravelShade = 0;
     float noteShadeStrength = 0.65f;
     GradientStops noteGradient = {{{0xffffff, 255}, {0xffffff, 0}}};
@@ -690,6 +692,8 @@ static Look lookForKey(Look const& base, KeyDef const& k) {
             if (key == "gradient-middle-position") middle.position = static_cast<float>(std::clamp(v, 0., 100.)) / 100.f;
         }
         if (key == "note-track-gradient") kl.noteTrackGradient = v != 0;
+        if (key == "note-gradient-flow") kl.noteGradientFlow = static_cast<int>(std::clamp(v, 0., 2.));
+        if (key == "note-gradient-flow-speed") kl.noteGradientFlowSpeed = static_cast<float>(std::clamp(v, 10., 300.)) / 100.f;
         if (key == "note-travel-shade") kl.noteTravelShade = static_cast<int>(std::clamp(v, 0., 2.));
         if (key == "note-shade-strength") kl.noteShadeStrength = static_cast<float>(std::clamp(v, 0., 100.)) / 100.f;
         if (key == "tile-idle-gradient") kl.idleGradient = v != 0;
@@ -1289,12 +1293,29 @@ static void paintNoteGlow(CCDrawNode* glow, Look const& look, ccColor3B color, f
     }
 }
 
+static bool hasMovingGradient(Look const& look) {
+    return look.gradNotes && look.noteGradientFlow != 0;
+}
+
+static float wrapGradientPhase(float position) {
+    return position - 2.f * std::floor(position * 0.5f);
+}
+
+static float gradientFlowPhase(Look const& look, double now) {
+    float direction = look.noteGradientFlow == 1 ? 1.f : -1.f;
+    if (look.reverseFlow) direction = -direction;
+    return wrapGradientPhase(static_cast<float>(std::fmod(now * look.noteGradientFlowSpeed * direction, 2.)));
+}
+
 static void paintNote(CCDrawNode* draw, CCDrawNode* glow, Look const& look, float x, float origin,
-                      float w, float length, float position, float trackHeight) {
+                      float w, float length, float position, float trackHeight, double now = 0.) {
     float visible = visibleNoteLength(position, length, trackHeight);
     if (visible < 0.05f) return;
     const float radius = std::min(std::clamp(look.noteRadius * w, 0.f, kMaxNoteRadius), std::min(w, length) / 2.f);
-    const float gradientLength = std::min(length, trackHeight);
+    const float gradientLength = look.noteTrackGradient ? trackHeight : std::min(length, trackHeight);
+    const float gradientOrigin = look.noteTrackGradient ? position : 0.f;
+    const bool movingGradient = hasMovingGradient(look);
+    const float phase = movingGradient ? gradientFlowPhase(look, now) : 0.f;
     const float rim = std::min({look.noteBorder, w * 0.25f, length * 0.25f});
     const float direction = look.reverseFlow ? -1.f : 1.f;
     auto quad = [origin, direction](CCDrawNode* target, float l0, float r0, float l1, float r1,
@@ -1320,7 +1341,7 @@ static void paintNote(CCDrawNode* draw, CCDrawNode* glow, Look const& look, floa
     auto colors = look.noteGradient;
     if (!look.gradNotes) colors = {{{packC(look.accentJump), 255}, {packC(look.accentJump), 255}}};
     std::vector<float> rows{0.f, visible};
-    rows.reserve(46 + kNoteExitFadeSteps);
+    rows.reserve(46 + kNoteExitFadeSteps + (movingGradient ? 6 : 0));
     for (int i = 0; i < kNoteExitFadeSteps; ++i) rows.push_back(noteExitFadeRow(trackHeight, i) - position);
     addCorners(rows, 0.f, length, radius);
     if (rim > 0.f) addCorners(rows, rim, length - rim, std::max(0.f, radius - rim));
@@ -1328,14 +1349,24 @@ static void paintNote(CCDrawNode* draw, CCDrawNode* glow, Look const& look, floa
         for (int i = 1; i < 20; ++i) rows.push_back(visible * i / 20.f);
         for (int i = 0; i < colors.count; ++i) {
             float stop = stopPosition(colors, i);
-            rows.push_back(look.noteTrackGradient ? trackHeight * stop - position : gradientLength * stop);
+            rows.push_back(gradientLength * stop - gradientOrigin);
+            if (movingGradient) {
+                // Anchor the mesh at both copies of each stop in the reflected repeat.
+                rows.push_back(gradientLength * wrapGradientPhase(phase + stop) - gradientOrigin);
+                rows.push_back(gradientLength * wrapGradientPhase(phase - stop) - gradientOrigin);
+            }
         }
     }
     sortRows(rows, 0.f, visible);
     auto fillAt = [&](float y) {
         float travel = position + y;
-        float gradientPosition = look.noteTrackGradient ? travel / trackHeight : y / gradientLength;
+        float gradientPosition = (gradientOrigin + y) / gradientLength;
         auto stop = gradientAt(colors, gradientPosition, kNoteOpacityCurve);
+        if (movingGradient) {
+            // The palette loops without a color jump. Stop opacity stays anchored to the note.
+            float reflected = 1.f - std::abs(1.f - wrapGradientPhase(gradientPosition - phase));
+            stop.color = gradientAt(colors, reflected).color;
+        }
         auto shade = shadeNote(unpackC(stop.color), look.noteTravelShade, look.noteShadeStrength, travel / trackHeight);
         float opacity = look.noteOpacity * (stop.alpha / 255.f) * noteFillFade(look, travel, trackHeight);
         return noteVertexColor(shade, opacity * noteExitFade(travel, trackHeight));
@@ -1706,7 +1737,7 @@ public:
             auto span = noteSpan(note, m_look, now, H);
             if (span.length < 0.05f) continue;
             float y = m_look.reverseFlow ? -m_look.noteBaseGap - span.distance : m_noteStart + span.distance;
-            paintNote(m_noteFill, m_noteGlow, m_look, x, y, nw, span.length, span.distance, H);
+            paintNote(m_noteFill, m_noteGlow, m_look, x, y, nw, span.length, span.distance, H, now);
         }
     }
 
@@ -2971,6 +3002,11 @@ protected:
     std::vector<CCLabelBMFont*> m_tileLabels;
     CCNode* m_counterPreview = nullptr;
     CCNode* m_notePreview = nullptr;
+    CCDrawNode* m_notePreviewFill = nullptr;
+    CCDrawNode* m_notePreviewGlow = nullptr;
+    std::optional<Look> m_animatedNotePreview;
+    float m_notePreviewWidth = 0.f;
+    double m_lastNotePreviewFrame = 0.;
     CCNode* m_depthPreview = nullptr;
     std::vector<Btn> m_btns, m_mapBtns;
 
@@ -3167,6 +3203,10 @@ protected:
         m_depthPreview = CCNode::create();
         m_canvasLabels->addChild(m_depthPreview);
         m_notePreview = CCNode::create();
+        m_notePreviewGlow = CCDrawNode::create();
+        m_notePreviewFill = CCDrawNode::create();
+        m_notePreview->addChild(m_notePreviewGlow, 0);
+        m_notePreview->addChild(m_notePreviewFill, 1);
         m_canvasLabels->addChild(m_notePreview);
         m_counterPreview = CCNode::create();
         m_canvasLabels->addChild(m_counterPreview);
@@ -3868,24 +3908,28 @@ protected:
         m_counterPreview->addChild(sample, 1);
     }
 
-    void drawNotePreview(Look const& look, float x, float y, float width, float zoom) {
-        float w = std::max(2.f, width * look.noteWidth);
-        auto sample = CCNode::create();
-        auto fill = CCDrawNode::create();
-        auto glow = CCDrawNode::create();
-        sample->addChild(glow, 0);
-        sample->addChild(fill, 1);
-        sample->setScale(zoom);
-        sample->setPosition({x, y});
-        m_notePreview->addChild(sample);
+    void paintNotePreview(Look const& look, double now) {
+        m_notePreviewFill->clear();
+        m_notePreviewGlow->clear();
+        m_lastNotePreviewFrame = now;
+        float w = std::max(2.f, m_notePreviewWidth * look.noteWidth);
         float bottom = 0.f;
         for (double hold : {0.075, 0.032, 0.017}) {
             float h = holdNoteLength(0.0, hold, look.noteSpeed, look.holdLengthScale, look.noteHeight);
             float distance = look.noteBaseGap + bottom;
-            paintNote(fill, glow, look, (width - w) / 2.f, look.reverseFlow ? -distance : distance,
-                      w, h, bottom, look.noteHeight);
+            paintNote(m_notePreviewFill, m_notePreviewGlow, look, (m_notePreviewWidth - w) / 2.f,
+                      look.reverseFlow ? -distance : distance, w, h, bottom, look.noteHeight, now);
             bottom += h + 7.f;
         }
+    }
+
+    void drawNotePreview(Look const& look, float x, float y, float width, float zoom) {
+        m_notePreviewWidth = width;
+        m_notePreview->setScale(zoom);
+        m_notePreview->setPosition({x, y});
+        m_notePreview->setVisible(true);
+        if (hasMovingGradient(look)) m_animatedNotePreview = look;
+        paintNotePreview(look, nowSec());
     }
 
     CCRect photoRect() const {
@@ -3985,7 +4029,8 @@ protected:
         m_canvas->clear();
         m_selectionOverlay->clear();
         m_counterPreview->removeAllChildrenWithCleanup(true);
-        m_notePreview->removeAllChildrenWithCleanup(true);
+        m_notePreview->setVisible(false);
+        m_animatedNotePreview.reset();
         m_depthPreview->removeAllChildrenWithCleanup(true);
         if (!m_mapMode && m_dragMode == 0) updateFit();
         redrawMinimap();
@@ -4998,6 +5043,17 @@ protected:
             [this, id](bool enabled) { writeStyle(id, "note-gradient-enabled", enabled); });
         rowGradient(id);
         localChoice("Gradient range", "note-track-gradient", {"Each note", "Whole track"}, 0);
+        rowCycle("Gradient flow", {"Off", "Flow upward", "Flow downward"},
+            [id] { return static_cast<int>(styleValue(id, "note-gradient-flow", 0)); },
+            [this, id](int direction) {
+                auto key = keyById(id);
+                if (!key) return;
+                key->style["note-gradient-flow"] = direction;
+                if (direction != 0) key->style["note-gradient-enabled"] = 1;
+                commitKey(id);
+                m_pendingRebuild = true;
+            });
+        localSlider("Gradient flow speed %", "note-gradient-flow-speed", 10.f, 300.f, 5.f, 60.f);
         localChoice("Brightness along track", "note-travel-shade", {"Off", "Darker upward", "Brighter upward"}, 0);
         localSlider("Track brightness strength %", "note-shade-strength", 0.f, 100.f, 5.f, 65.f);
         this->settingSlider("Note opacity %", "note-opacity", 20.f, 100.f, 1.f);
@@ -5539,6 +5595,11 @@ public:
             m_viewer->applyLook();
             if (Mod::get()->saveData().isOk()) cleanPhotoHistory(false);
             this->removeFromParentAndCleanup(true);
+            return;
+        }
+        if (m_animatedNotePreview && !m_modal) {
+            double now = nowSec();
+            if (now - m_lastNotePreviewFrame >= 1. / 30.) paintNotePreview(*m_animatedNotePreview, now);
         }
     }
 };

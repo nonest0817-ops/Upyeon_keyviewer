@@ -1,3 +1,7 @@
+# v1.0.11
+
+- Animate note gradient colors per key with adjustable direction and speed and a live editor preview.
+
 # v1.0.10
 
 - Fade the note fill, outline, and glow smoothly over the last fifth of the track.
