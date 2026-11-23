@@ -301,6 +301,7 @@ struct Look {
     bool gradNotes = false;
     bool gradTile = false;
     bool idleGradient = false;
+    bool noteTrackGradient = false;
     int noteTravelShade = 0;
     float noteShadeStrength = 0.65f;
     GradientStops noteGradient = {{{0xffffff, 255}, {0xffffff, 0}}};
@@ -650,6 +651,7 @@ static Look lookForKey(Look const& base, KeyDef const& k) {
         if (key == "gradient-top-alpha") kl.noteGradient[1].alpha = static_cast<int>(std::clamp(v, 0., 255.));
         if (key == "gradient-bottom-position") kl.noteGradient[0].position = static_cast<float>(std::clamp(v, 0., 100.)) / 100.f;
         if (key == "gradient-top-position") kl.noteGradient[1].position = static_cast<float>(std::clamp(v, 0., 100.)) / 100.f;
+        if (key == "note-track-gradient") kl.noteTrackGradient = v != 0;
         if (key == "note-travel-shade") kl.noteTravelShade = static_cast<int>(std::clamp(v, 0., 2.));
         if (key == "note-shade-strength") kl.noteShadeStrength = static_cast<float>(std::clamp(v, 0., 100.)) / 100.f;
         if (key == "tile-idle-gradient") kl.idleGradient = v != 0;
@@ -903,10 +905,11 @@ struct GradientPreset {
     float fadeStart = -1.f;
     float speed = 265.f;
     float width = 90.f;
+    bool trackGradient = false;
 };
 
 static const std::array<GradientPreset, 7> kGradientPresets = {{
-    {"Cyan Flow", 0x00e5ff, 0x607da8, 0xccecff, 0.f, 4.f, 1.65f, 84.f, 0.f, 300.f, 100.f},
+    {"Cyan Flow", 0x00e5ff, 0x607da8, 0xccecff, 22.f, 4.f, 1.65f, 84.f, 0.f, 300.f, 100.f, true},
     {"Aurora Mint", 0x00c995, 0xacffdc, 0x64eac4, 75.f, 8.f},
     {"Ocean Blue", 0x1461ff, 0x9cecff, 0x7dd6ff, 100.f, 7.f},
     {"Pulse Violet", 0x6e39e4, 0xf1bfff, 0xbe9afa, 105.f, 8.f},
@@ -925,6 +928,7 @@ static std::string builtInGradientPreset(GradientPreset const& profile) {
         {"show-timeline", 1.}, {"note-gradient-enabled", 1.},
         {"note-gradient-bottom", double(profile.color)}, {"gradient-bottom-alpha", 255.},
         {"note-gradient-top", double(profile.tip)}, {"gradient-top-alpha", 0.},
+        {"note-track-gradient", profile.trackGradient ? 1. : 0.},
         {"note-width", profile.width}, {"note-opacity", 100.}, {"note-speed", profile.speed},
         {"note-fade", profile.fade}, {"note-radius", profile.radius},
         {"note-border", 0.85}, {"note-border-color", double(profile.edge)}, {"note-rim-opacity", profile.rim},
@@ -1122,12 +1126,16 @@ static void paintNote(CCDrawNode* draw, CCDrawNode* glow, Look const& look, floa
     if (rim > 0.f) addCorners(rows, rim, length - rim, std::max(0.f, radius - rim));
     if (look.gradNotes || look.noteTravelShade || look.noteFade > 0.f) {
         for (int i = 1; i < 20; ++i) rows.push_back(visible * i / 20.f);
-        for (int i = 0; i < 2; ++i) rows.push_back(length * stopPosition(colors, i));
+        for (int i = 0; i < 2; ++i) {
+            float stop = stopPosition(colors, i);
+            rows.push_back(look.noteTrackGradient ? trackHeight * stop - position : length * stop);
+        }
     }
     sortRows(rows, 0.f, visible);
     auto fillAt = [&](float y) {
-        auto stop = gradientAt(colors, y / length, kNoteOpacityCurve);
         float travel = position + y;
+        float gradientPosition = look.noteTrackGradient ? travel / trackHeight : y / length;
+        auto stop = gradientAt(colors, gradientPosition, kNoteOpacityCurve);
         auto shade = shadeNote(unpackC(stop.color), look.noteTravelShade, look.noteShadeStrength, travel / trackHeight);
         return noteVertexColor(shade, look.noteOpacity * (stop.alpha / 255.f) * noteFillFade(look, travel, trackHeight));
     };
@@ -4168,6 +4176,7 @@ protected:
             [id] { auto key = keyById(id); return key && lookForKey(readLook(), *key).gradNotes; },
             [this, id](bool enabled) { writeStyle(id, "note-gradient-enabled", enabled); });
         rowGradient(id);
+        localChoice("Gradient range", "note-track-gradient", {"Each note", "Whole track"}, 0);
         localChoice("Brightness along track", "note-travel-shade", {"Off", "Darker upward", "Brighter upward"}, 0);
         localSlider("Track brightness strength %", "note-shade-strength", 0.f, 100.f, 5.f, 65.f);
         this->settingSlider("Note opacity %", "note-opacity", 20.f, 100.f, 1.f);

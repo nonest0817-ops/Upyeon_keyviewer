@@ -21,8 +21,8 @@ Geometry Dash 2.2081 · Geode 5.9.0 · v1.0.5
 
 하단 **도구**의 **노트** 탭에서 표시 프레임 제한, 속도, 트랙 높이, 방향과 페이드를 조절합니다. **고급** 탭에서는 짧은 입력을 판단하는 시간, 짧은 노트의 최소 길이, 키 표시 지연을 지정합니다. 지연 자동 계산은 현재 트랙 높이를 속도로 나눈 값을 사용합니다. **저장**을 눌러 선택한 키에 적용하세요.
 
-**키** 탭의 그림자와 입체 효과는 키마다 켜고 끌 수 있습니다. **그라데이션 편집**에서는 아래쪽과 사라지는 끝 버튼으로 각각을 선택하고, 위쪽 띠의 색점을 끌어 위치를 옮깁니다. 아래 투명도 띠를 끌거나 휠로 선택한 색점의 투명도를 조절합니다. **이동 중 밝기**에서는 노트가 진행 방향을 따라 밝아지거나 어두워지게 설정할 수 있습니다. 노트는 트랙 끝에서 앞부분부터 잘리며, 뒤쪽 끝이 트랙 끝을 통과할 때 사라집니다. 영상의 시안색 채움과 밝은 테두리는 **프리셋 → 시안 플로우**로 적용할 수 있습니다.
+**키** 탭의 그림자와 입체 효과는 키마다 켜고 끌 수 있습니다. **그라데이션 편집**에서는 아래쪽과 사라지는 끝 버튼으로 각각을 선택하고, 위쪽 띠의 색점을 끌어 위치를 옮깁니다. 아래 투명도 띠를 끌거나 휠로 선택한 색점의 투명도를 조절합니다. **이동 중 밝기**에서는 노트가 진행 방향을 따라 밝아지거나 어두워지게 설정할 수 있습니다. 노트는 트랙 끝에서 앞부분부터 잘리며, 뒤쪽 끝이 트랙 끝을 통과할 때 사라집니다. **그라데이션 범위**는 노트마다 또는 트랙 전체로 설정할 수 있습니다. 영상의 시안색 채움과 밝은 테두리는 **프리셋 → 시안 플로우**로 적용할 수 있습니다.
 
 ## English
 
-Open **Key Viewer** from the pause menu. Use the title-bar button to switch between light and dark. Select a key or statistics tile on the canvas to move or resize it. Hover over a numeric field and scroll to adjust it. On touch screens, tap the left or right half of the field. In **Note → Edit gradient**, select either stop to adjust its color and opacity. Apply **Cyan Flow** from the **Sets** tab for a bright cyan fill, pale outline, and a fade along the track. Choose a PNG or JPEG under **View → Choose photo** to add an adjustable image behind the keys. Save a blank key name to hide the label.
+Open **Key Viewer** from the pause menu. Use the title-bar button to switch between light and dark. Select a key or statistics tile on the canvas to move or resize it. Hover over a numeric field and scroll to adjust it. On touch screens, tap the left or right half of the field. In **Note → Edit gradient**, select either stop to adjust its color and opacity. Apply **Cyan Flow** from the **Sets** tab for a bright cyan fill, pale outline, and a gradient across the entire track. Choose a PNG or JPEG under **View → Choose photo** to add an adjustable image behind the keys. Save a blank key name to hide the label.
