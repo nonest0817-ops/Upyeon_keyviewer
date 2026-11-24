@@ -310,6 +310,8 @@ static ccColor3B shadeNote(ccColor3B color, int mode, float strength, float prog
 static constexpr int kDefaultSparkCount = 20;
 static constexpr int kMaxSparkCount = 32;
 static constexpr int kMaxSparkRange = 250;
+static constexpr int kMinSparkSize = 25;
+static constexpr int kMaxSparkSize = 250;
 
 struct Look {
     float size = 44.f;
@@ -348,9 +350,12 @@ struct Look {
     float shortNoteTime = 0.050f;
     float keyDelay = 0.f;
     bool keyEdgeFlash = false;
+    bool keyBlueBloom = false;
+    float keyEdgeLightStrength = 1.f;
     bool keyPressSparks = false;
     int keySparkCount = kDefaultSparkCount;
     float keySparkRange = 1.f;
+    float keySparkSize = 1.f;
     bool keyShadow = false;
     float keyShadowDepth = 4.f;
     float keyShadowOpacity = 0.46f;
@@ -731,9 +736,13 @@ static Look lookForKey(Look const& base, KeyDef const& k) {
         if (key == "short-note-time") kl.shortNoteTime = static_cast<float>(std::clamp(v, 1., 300.)) / 1000.f;
         if (key == "key-display-delay") kl.keyDelay = static_cast<float>(std::clamp(v, 0., 1500.)) / 1000.f;
         if (key == "key-edge-flash") kl.keyEdgeFlash = v != 0;
+        if (key == "key-edge-blue-bloom") kl.keyBlueBloom = v != 0;
+        if (key == "key-edge-light-strength") kl.keyEdgeLightStrength = static_cast<float>(std::clamp(v, 0., 150.)) / 100.f;
         if (key == "key-press-sparks") kl.keyPressSparks = v != 0;
         if (key == "key-particle-count") kl.keySparkCount = static_cast<int>(std::clamp(v, 0., double(kMaxSparkCount)));
         if (key == "key-particle-range") kl.keySparkRange = static_cast<float>(std::clamp(v, 0., double(kMaxSparkRange))) / 100.f;
+        if (key == "key-particle-size") kl.keySparkSize = static_cast<float>(
+            std::clamp(v, double(kMinSparkSize), double(kMaxSparkSize))) / 100.f;
         if (key == "note-rim-glow") kl.noteRimGlow = static_cast<float>(std::clamp(v, 0., 100.)) / 100.f;
         if (key == "note-fill-opacity") kl.noteFillOpacity = static_cast<float>(std::clamp(v, 0., 100.)) / 100.f;
         if (key == "key-shadow") kl.keyShadow = v != 0;
@@ -987,13 +996,21 @@ struct GradientPreset {
     StyleValues overrides;
 };
 
-static const std::array<GradientPreset, 9> kGradientPresets = {{
+static const std::array<GradientPreset, 10> kGradientPresets = {{
     {.title = "Ice Glass", .color = 0x70eaf6, .tip = 0x7375c4, .edge = 0xe5faff, .glow = 0.f,
      .radius = 8.f, .fade = 0.8f, .rim = 88.f, .fadeStart = 58.f, .speed = 285.f,
      .width = 90.f, .trackGradient = true, .borderWidth = 1.25f,
      .middle = GradientStop{0x548eea, 235, 0.50f}, .background = 0x101d30, .pressed = 0x29445e,
      .overrides = {{"tile-opacity", 228.}, {"note-fill-opacity", 30.}, {"note-rim-glow", 32.},
                    {"note-gradient-flow", 1.}, {"note-gradient-flow-speed", 35.}, {"key-edge-flash", 1.}}},
+    {.title = "Cobalt Flare", .color = 0x627bff, .tip = 0x182991, .edge = 0x849fff, .glow = 0.f,
+     .radius = 7.f, .fade = 0.72f, .rim = 64.f, .fadeStart = 55.f, .speed = 285.f,
+     .width = 92.f, .trackGradient = true, .borderWidth = 0.9f,
+     .middle = GradientStop{0x2c45ef, 247, 0.32f}, .background = 0x111837, .pressed = 0x294fa6,
+     .overrides = {{"note-fill-opacity", 91.}, {"note-rim-glow", 20.},
+                   {"key-edge-flash", 1.}, {"key-edge-blue-bloom", 1.}, {"key-edge-light-strength", 110.},
+                   {"key-press-sparks", 1.}, {"key-particle-count", 28.}, {"key-particle-size", 65.},
+                   {"key-particle-range", 125.}}},
     {.title = "Glacier Cyan", .color = 0x42edf3, .tip = 0x4d8abb, .edge = 0xe6faff, .glow = 38.f,
      .radius = 6.f, .fade = 0.8f, .rim = 91.f, .fadeStart = 70.f, .speed = 290.f,
      .width = 98.f, .trackGradient = true, .borderWidth = 1.15f,
@@ -1455,11 +1472,57 @@ static float keyTileScale(Look const& look, float width, float height) {
     return std::clamp(radius / kBaseR, 0.2f, std::max(0.2f, std::min(width, height) / kCap));
 }
 
+static void paintKeyBlueBloom(CCDrawNode* draw, Look const& look, float width, float height, float opacity) {
+    struct BloomRow { float height, width, alpha, whiteMix, contact; };
+    constexpr std::array<BloomRow, 11> rows{{
+        {-1.00f, 1.06f, 0.00f, 0.15f, 0.f},
+        {-0.56f, 1.13f, 0.12f, 0.24f, 0.f},
+        {-0.24f, 1.18f, 0.39f, 0.53f, 0.1f},
+        {-0.10f, 1.22f, 0.70f, 0.79f, 0.5f},
+        { 0.00f, 1.30f, 1.00f, 1.00f, 1.f},
+        { 0.035f, 1.17f, 0.79f, 0.87f, 0.6f},
+        { 0.10f, 1.13f, 0.53f, 0.56f, 0.1f},
+        { 0.23f, 1.07f, 0.32f, 0.24f, 0.f},
+        { 0.43f, 0.97f, 0.17f, 0.08f, 0.f},
+        { 0.70f, 0.86f, 0.06f, 0.00f, 0.f},
+        { 1.00f, 0.73f, 0.00f, 0.00f, 0.f},
+    }};
+    constexpr std::array columns{-1.f, -0.86f, -0.64f, -0.35f, 0.f, 0.35f, 0.64f, 0.86f, 1.f};
+    constexpr std::array ambientAlpha{0.f, 0.05f, 0.24f, 0.64f, 1.f, 0.64f, 0.24f, 0.05f, 0.f};
+    constexpr std::array contactAlpha{0.f, 0.20f, 0.72f, 0.97f, 1.f, 0.97f, 0.72f, 0.20f, 0.f};
+    float rise = std::clamp(width * 1.35f, 18.f, 72.f);
+    float fall = std::clamp(height * 0.27f, 2.f, 14.f);
+    auto blue = lerpC(keyImpactColor(look), {28, 66, 255}, 0.78f);
+    std::array<std::array<ccV2F_C4B_T2F, columns.size()>, rows.size()> vertices;
+    for (size_t i = 0; i < rows.size(); ++i) {
+        auto const& row = rows[i];
+        float y = height + row.height * (row.height < 0.f ? fall : rise);
+        for (size_t j = 0; j < columns.size(); ++j) {
+            float across = std::lerp(ambientAlpha[j], contactAlpha[j], row.contact);
+            float x = width * 0.5f * (1.f + row.width * columns[j]);
+            auto color = lerpC(blue, {255, 255, 255}, row.whiteMix * (0.81f + 0.19f * across));
+            vertices[i][j] = {{x, y}, noteVertexColor(color, opacity * row.alpha * across), {0.f, 0.f}};
+        }
+    }
+    for (size_t i = 1; i < rows.size(); ++i) {
+        for (size_t j = 1; j < columns.size(); ++j) {
+            std::array quad{vertices[i - 1][j - 1], vertices[i - 1][j], vertices[i][j], vertices[i][j - 1]};
+            appendNotePolygon(draw, quad);
+        }
+    }
+}
+
 static void paintKeyFlash(CCDrawNode* draw, Look const& look, float width, float height, double age, float sustain) {
     if (!look.keyEdgeFlash || width < 4.f || height < 4.f) return;
     float impact = age >= 0. ? std::clamp(1.f - static_cast<float>(age / kKeyFlashTime), 0.f, 1.f) : 0.f;
-    float opacity = 0.42f * sustain + 0.28f * impact * impact;
+    float opacity = look.keyBlueBloom ? 0.83f * sustain + 0.42f * impact * impact
+                                      : 0.42f * sustain + 0.28f * impact * impact;
+    opacity = std::min(1.f, opacity * look.keyEdgeLightStrength);
     if (opacity < 0.004f) return;
+    if (look.keyBlueBloom) {
+        paintKeyBlueBloom(draw, look, width, height, opacity);
+        return;
+    }
 
     const float radius = std::min(kBaseR * keyTileScale(look, width, height), std::min(width, height) * 0.5f);
     const float outer = std::clamp(width * 0.25f, 4.f, 13.f);
@@ -1504,7 +1567,7 @@ static double keySparkLifetime(unsigned seed) {
 }
 
 static void paintKeySpark(CCDrawNode* draw, ccColor3B tint, float width, float height, double age,
-                         unsigned seed, float range = 1.f) {
+                         unsigned seed, float range = 1.f, float size = 1.f) {
     double life = keySparkLifetime(seed);
     if (age < 0. || age >= life) return;
     float t = static_cast<float>(age / life);
@@ -1517,7 +1580,7 @@ static void paintKeySpark(CCDrawNode* draw, ccColor3B tint, float width, float h
         drift * (side * t + 0.38f * bend * std::sin(kPi * t));
     float rise = std::lerp(24.f, 52.f, sparkVariation(seed, 5u)) * range;
     float y = height + 0.65f + rise * t * (1.28f - 0.28f * t);
-    float radius = std::lerp(0.63f, 1.06f, sparkVariation(seed, 6u)) * (1.f - 0.30f * t);
+    float radius = std::lerp(0.63f, 1.06f, sparkVariation(seed, 6u)) * (1.f - 0.30f * t) * size;
     constexpr int sides = 9;
     constexpr std::array radii{0.f, 0.28f, 0.60f, 1.f};
     constexpr std::array opacity{0.98f, 0.75f, 0.23f, 0.f};
@@ -1610,7 +1673,7 @@ public:
     void paint(CCDrawNode* draw, Look const& look, float width, float height, double now) const {
         auto tint = keyImpactColor(look);
         for (auto const& [time, seed] : m_particles)
-            paintKeySpark(draw, tint, width, height, now - time, seed, look.keySparkRange);
+            paintKeySpark(draw, tint, width, height, now - time, seed, look.keySparkRange, look.keySparkSize);
     }
 
     void clear() {
@@ -5273,9 +5336,12 @@ protected:
         settingSlider("Idle opacity", "tile-opacity", 0.f, 255.f, 1.f, true);
         settingToggle("Press glow", "show-glow");
         localToggle("Key edge flash", "key-edge-flash", false);
+        localChoice("Key edge light style", "key-edge-blue-bloom", {"Soft edge light", "Blue-white bloom"}, 0);
+        localSlider("Key edge light strength %", "key-edge-light-strength", 0.f, 150.f, 5.f, 100.f);
         localToggle("Press particles", "key-press-sparks", false);
         localSlider("Particle count", "key-particle-count", 0.f, kMaxSparkCount, 1.f, kDefaultSparkCount);
         localSlider("Particle range %", "key-particle-range", 0.f, kMaxSparkRange, 5.f, 100.f);
+        localSlider("Particle size %", "key-particle-size", kMinSparkSize, kMaxSparkSize, 5.f, 100.f);
         settingToggle("Key counters", "show-counter");
         localToggle("Box gradient", "tile-idle-gradient", false);
         settingColor("Gradient end color", "gradient-color");

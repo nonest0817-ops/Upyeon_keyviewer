@@ -1,3 +1,8 @@
+# v1.0.16
+
+- Add per-key particle size and edge light strength controls.
+- Add a blue-white edge light style and the Cobalt Flare preset.
+
 # v1.0.15
 
 - Add per-key controls for the simultaneous particle count and travel range.
