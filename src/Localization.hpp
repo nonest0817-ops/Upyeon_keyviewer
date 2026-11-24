@@ -165,6 +165,8 @@ static std::string uiText(std::string const& text) {
         {"Pasted keys ", "붙여넣은 키 "},
         {"Ice Glass", "얼음 유리"},
         {"Key edge flash", "키 윗모서리 발광"},
+        {"Particle count", "입자 개수"},
+        {"Particle range %", "입자 범위 %"},
         {"Press particles", "눌림 입자"},
         {"Note fill opacity %", "노트 채움 불투명도 %"},
         {"Note border glow %", "노트 테두리 발광 %"},

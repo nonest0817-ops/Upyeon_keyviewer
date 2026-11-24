@@ -307,6 +307,10 @@ static ccColor3B shadeNote(ccColor3B color, int mode, float strength, float prog
     return color;
 }
 
+static constexpr int kDefaultSparkCount = 20;
+static constexpr int kMaxSparkCount = 32;
+static constexpr int kMaxSparkRange = 250;
+
 struct Look {
     float size = 44.f;
     float radius = 0.16f; // 박스 크기 대비 모서리 비율
@@ -345,6 +349,8 @@ struct Look {
     float keyDelay = 0.f;
     bool keyEdgeFlash = false;
     bool keyPressSparks = false;
+    int keySparkCount = kDefaultSparkCount;
+    float keySparkRange = 1.f;
     bool keyShadow = false;
     float keyShadowDepth = 4.f;
     float keyShadowOpacity = 0.46f;
@@ -726,6 +732,8 @@ static Look lookForKey(Look const& base, KeyDef const& k) {
         if (key == "key-display-delay") kl.keyDelay = static_cast<float>(std::clamp(v, 0., 1500.)) / 1000.f;
         if (key == "key-edge-flash") kl.keyEdgeFlash = v != 0;
         if (key == "key-press-sparks") kl.keyPressSparks = v != 0;
+        if (key == "key-particle-count") kl.keySparkCount = static_cast<int>(std::clamp(v, 0., double(kMaxSparkCount)));
+        if (key == "key-particle-range") kl.keySparkRange = static_cast<float>(std::clamp(v, 0., double(kMaxSparkRange))) / 100.f;
         if (key == "note-rim-glow") kl.noteRimGlow = static_cast<float>(std::clamp(v, 0., 100.)) / 100.f;
         if (key == "note-fill-opacity") kl.noteFillOpacity = static_cast<float>(std::clamp(v, 0., 100.)) / 100.f;
         if (key == "key-shadow") kl.keyShadow = v != 0;
@@ -1495,7 +1503,8 @@ static double keySparkLifetime(unsigned seed) {
     return std::lerp(0.35, kKeySparkMaxLife, static_cast<double>(sparkVariation(seed, 1u)));
 }
 
-static void paintKeySpark(CCDrawNode* draw, ccColor3B tint, float width, float height, double age, unsigned seed) {
+static void paintKeySpark(CCDrawNode* draw, ccColor3B tint, float width, float height, double age,
+                         unsigned seed, float range = 1.f) {
     double life = keySparkLifetime(seed);
     if (age < 0. || age >= life) return;
     float t = static_cast<float>(age / life);
@@ -1503,10 +1512,10 @@ static void paintKeySpark(CCDrawNode* draw, ccColor3B tint, float width, float h
     float fade = 1.f - end * end * (3.f - 2.f * end);
     float side = sparkVariation(seed, 2u) * 2.f - 1.f;
     float bend = sparkVariation(seed, 3u) * 2.f - 1.f;
-    float drift = std::clamp(width * 0.53f, 8.f, 32.f);
+    float drift = std::clamp(width * 0.53f, 8.f, 32.f) * range;
     float x = width * std::lerp(0.16f, 0.84f, sparkVariation(seed, 4u)) +
         drift * (side * t + 0.38f * bend * std::sin(kPi * t));
-    float rise = std::lerp(24.f, 52.f, sparkVariation(seed, 5u));
+    float rise = std::lerp(24.f, 52.f, sparkVariation(seed, 5u)) * range;
     float y = height + 0.65f + rise * t * (1.28f - 0.28f * t);
     float radius = std::lerp(0.63f, 1.06f, sparkVariation(seed, 6u)) * (1.f - 0.30f * t);
     constexpr int sides = 9;
@@ -1541,36 +1550,67 @@ static void paintKeySpark(CCDrawNode* draw, ccColor3B tint, float width, float h
 }
 
 class KeySparkStream {
-    std::deque<std::pair<double, unsigned>> m_particles;
+    using Particle = std::pair<double, unsigned>;
+    std::deque<Particle> m_particles;
     double m_next = -1.;
     unsigned m_seed = 0;
 
-    void add(double time) {
-        if (m_particles.size() >= 20) m_particles.pop_front();
+    static double expiresAt(Particle const& particle) {
+        return particle.first + keySparkLifetime(particle.second);
+    }
+
+    void discardExpired(double now) {
+        std::erase_if(m_particles, [now](auto const& particle) { return expiresAt(particle) <= now; });
+    }
+
+    void trim(int limit) {
+        while (static_cast<int>(m_particles.size()) > limit) m_particles.pop_front();
+    }
+
+    void emit(double time, int limit) {
+        discardExpired(time);
+        if (static_cast<int>(m_particles.size()) == limit) {
+            // Keep the existing particles through their fade, then use the next available slot.
+            auto earliest = std::min_element(m_particles.begin(), m_particles.end(),
+                [](Particle const& a, Particle const& b) { return expiresAt(a) < expiresAt(b); });
+            m_next = expiresAt(*earliest);
+            return;
+        }
         m_particles.emplace_back(time, ++m_seed);
-        m_next = time + std::lerp(0.025, 0.058, static_cast<double>(sparkVariation(m_seed, 7u)));
+        double spacing = std::lerp(0.025, 0.058, static_cast<double>(sparkVariation(m_seed, 7u)));
+        m_next = time + std::min(0.30, spacing * kDefaultSparkCount / limit);
     }
 
 public:
-    void tap(double time) { add(time); }
+    void tap(double time, int limit = kDefaultSparkCount) {
+        if (limit <= 0) {
+            clear();
+            return;
+        }
+        trim(limit);
+        emit(time, limit);
+    }
 
-    void advance(double now, bool held) {
+    void advance(double now, bool held, int limit = kDefaultSparkCount) {
+        if (limit <= 0) {
+            clear();
+            return;
+        }
+        trim(limit);
         if (held) {
             // A skipped frame only catches up emissions that can still be visible.
             m_next = m_next < 0. ? now : std::max(m_next, now - kKeySparkMaxLife);
-            while (m_next <= now) add(m_next);
+            while (m_next <= now) emit(m_next, limit);
         } else {
             m_next = -1.;
         }
-        std::erase_if(m_particles, [now](auto const& particle) {
-            return now - particle.first >= keySparkLifetime(particle.second);
-        });
+        discardExpired(now);
     }
 
     void paint(CCDrawNode* draw, Look const& look, float width, float height, double now) const {
         auto tint = keyImpactColor(look);
         for (auto const& [time, seed] : m_particles)
-            paintKeySpark(draw, tint, width, height, now - time, seed);
+            paintKeySpark(draw, tint, width, height, now - time, seed, look.keySparkRange);
     }
 
     void clear() {
@@ -1840,7 +1880,7 @@ public:
             if (m_presses < std::numeric_limits<int>::max()) ++m_presses;
             m_countStart = t;
             if (m_look.keyEdgeFlash) m_keyFlashAt = t;
-            if (m_look.keyPressSparks) m_keySparks.tap(t);
+            if (m_look.keyPressSparks) m_keySparks.tap(t, m_look.keySparkCount);
             setCountText();
             fitCount(t);
             if (drawNotes && m_look.timeline) {
@@ -1850,9 +1890,9 @@ public:
                 m_notes.push_back(n);
             }
         } else if (m_held & bit) {
-            if (m_look.keyPressSparks) m_keySparks.advance(t, true);
+            if (m_look.keyPressSparks) m_keySparks.advance(t, true, m_look.keySparkCount);
             m_held &= ~bit;
-            if (!m_held && m_look.keyPressSparks) m_keySparks.advance(t, false);
+            if (!m_held && m_look.keyPressSparks) m_keySparks.advance(t, false, m_look.keySparkCount);
             for (auto it = m_notes.rbegin(); it != m_notes.rend(); ++it) {
                 if (it->source == source && it->end < 0) {
                     it->end = t;
@@ -1958,7 +1998,7 @@ public:
             paintKeyFlash(m_keyEffects, m_look, m_w, m_h, m_keyFlashAt >= 0. ? now - m_keyFlashAt : -1.,
                           m_held ? 1.f : m_press);
         if (m_look.keyPressSparks) {
-            m_keySparks.advance(now, m_held != 0);
+            m_keySparks.advance(now, m_held != 0, m_look.keySparkCount);
             m_keySparks.paint(m_keyEffects, m_look, m_w, m_h, now);
         } else {
             m_keySparks.clear();
@@ -4122,7 +4162,7 @@ protected:
         double age = m_previewImpactAt >= 0. ? now - m_previewImpactAt : -1.;
         paintKeyFlash(m_pressPreview, look, m_pressPreviewSize.width, m_pressPreviewSize.height, age, 1.f);
         if (look.keyPressSparks) {
-            m_previewSparks.advance(now, true);
+            m_previewSparks.advance(now, true, look.keySparkCount);
             m_previewSparks.paint(m_pressPreview, look, m_pressPreviewSize.width, m_pressPreviewSize.height, now);
         } else {
             m_previewSparks.clear();
@@ -5234,6 +5274,8 @@ protected:
         settingToggle("Press glow", "show-glow");
         localToggle("Key edge flash", "key-edge-flash", false);
         localToggle("Press particles", "key-press-sparks", false);
+        localSlider("Particle count", "key-particle-count", 0.f, kMaxSparkCount, 1.f, kDefaultSparkCount);
+        localSlider("Particle range %", "key-particle-range", 0.f, kMaxSparkRange, 5.f, 100.f);
         settingToggle("Key counters", "show-counter");
         localToggle("Box gradient", "tile-idle-gradient", false);
         settingColor("Gradient end color", "gradient-color");

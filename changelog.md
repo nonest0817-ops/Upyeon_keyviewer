@@ -1,3 +1,7 @@
+# v1.0.15
+
+- Add per-key controls for the simultaneous particle count and travel range.
+
 # v1.0.14
 
 - Spread the key edge light into a wider, softer halo.
