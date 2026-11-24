@@ -1434,8 +1434,8 @@ static void paintNote(CCDrawNode* draw, CCDrawNode* glow, Look const& look, floa
     }
 }
 
-static constexpr double kKeyFlashTime = 0.16;
-static constexpr double kKeySparkTime = 0.24;
+static constexpr double kKeyFlashTime = 0.20;
+static constexpr double kKeySparkMaxLife = 0.62;
 
 static ccColor3B keyImpactColor(Look const& look) {
     auto color = look.gradNotes ? unpackC(look.noteGradient[0].color) : look.accentJump;
@@ -1450,14 +1450,14 @@ static float keyTileScale(Look const& look, float width, float height) {
 static void paintKeyFlash(CCDrawNode* draw, Look const& look, float width, float height, double age, float sustain) {
     if (!look.keyEdgeFlash || width < 4.f || height < 4.f) return;
     float impact = age >= 0. ? std::clamp(1.f - static_cast<float>(age / kKeyFlashTime), 0.f, 1.f) : 0.f;
-    float opacity = std::min(1.f, 0.68f * sustain + 0.50f * impact * impact);
+    float opacity = 0.42f * sustain + 0.28f * impact * impact;
     if (opacity < 0.004f) return;
 
     const float radius = std::min(kBaseR * keyTileScale(look, width, height), std::min(width, height) * 0.5f);
-    const float outer = std::clamp(width * 0.13f, 2.4f, 6.2f);
-    const std::array offsets{-std::min(radius * 0.86f, 2.6f), -0.60f, 0.f,
-                             outer * 0.17f, outer * 0.42f, outer * 0.72f, outer};
-    constexpr std::array falloff{0.f, 0.78f, 1.f, 0.71f, 0.32f, 0.09f, 0.f};
+    const float outer = std::clamp(width * 0.25f, 4.f, 13.f);
+    const std::array offsets{-std::min(radius * 0.88f, 4.0f), -std::min(radius * 0.55f, 1.8f), 0.f,
+                             outer * 0.18f, outer * 0.40f, outer * 0.62f, outer * 0.82f, outer};
+    constexpr std::array falloff{0.f, 0.67f, 1.f, 0.89f, 0.60f, 0.28f, 0.08f, 0.f};
     const auto tint = keyImpactColor(look);
     std::array<std::array<ccV2F_C4B_T2F, offsets.size()>, 10> vertices;
     for (size_t i = 0; i < vertices.size(); ++i) {
@@ -1470,7 +1470,7 @@ static void paintKeyFlash(CCDrawNode* draw, Look const& look, float width, float
         const float across = step * (2.f - step);
         for (size_t j = 0; j < offsets.size(); ++j) {
             float extent = radius + offsets[j];
-            auto color = lerpC(tint, {255, 255, 255}, 0.80f * falloff[j]);
+            auto color = lerpC(tint, {255, 255, 255}, 0.34f * falloff[j]);
             vertices[i][j] = {{cx + nx * extent, cy + ny * extent},
                               noteVertexColor(color, opacity * falloff[j] * across), {0.f, 0.f}};
         }
@@ -1483,15 +1483,32 @@ static void paintKeyFlash(CCDrawNode* draw, Look const& look, float width, float
     }
 }
 
+static float sparkVariation(unsigned seed, unsigned channel) {
+    unsigned bits = seed + channel * 0x9e3779b9u;
+    bits = (bits ^ (bits >> 16)) * 0x7feb352du;
+    bits = (bits ^ (bits >> 15)) * 0x846ca68bu;
+    bits ^= bits >> 16;
+    return static_cast<float>(bits >> 16) / 65535.f;
+}
+
+static double keySparkLifetime(unsigned seed) {
+    return std::lerp(0.35, kKeySparkMaxLife, static_cast<double>(sparkVariation(seed, 1u)));
+}
+
 static void paintKeySpark(CCDrawNode* draw, ccColor3B tint, float width, float height, double age, unsigned seed) {
-    if (age < 0. || age >= kKeySparkTime) return;
-    float t = static_cast<float>(age / kKeySparkTime);
-    float fade = (1.f - t) * (1.f - t);
-    float f = static_cast<float>((seed * 73u) % 101u) / 100.f;
-    float rise = static_cast<float>((seed * 53u + 17u) % 103u) / 102.f;
-    float x = width * (0.22f + 0.56f * f) + (f - 0.5f) * 11.f * t;
-    float y = height + 0.65f + (1.f - fade) * (6.f + 10.f * rise);
-    float radius = (0.68f + 0.40f * f) * (1.f - 0.35f * t);
+    double life = keySparkLifetime(seed);
+    if (age < 0. || age >= life) return;
+    float t = static_cast<float>(age / life);
+    float end = std::clamp((t - 0.25f) / 0.75f, 0.f, 1.f);
+    float fade = 1.f - end * end * (3.f - 2.f * end);
+    float side = sparkVariation(seed, 2u) * 2.f - 1.f;
+    float bend = sparkVariation(seed, 3u) * 2.f - 1.f;
+    float drift = std::clamp(width * 0.53f, 8.f, 32.f);
+    float x = width * std::lerp(0.16f, 0.84f, sparkVariation(seed, 4u)) +
+        drift * (side * t + 0.38f * bend * std::sin(kPi * t));
+    float rise = std::lerp(24.f, 52.f, sparkVariation(seed, 5u));
+    float y = height + 0.65f + rise * t * (1.28f - 0.28f * t);
+    float radius = std::lerp(0.63f, 1.06f, sparkVariation(seed, 6u)) * (1.f - 0.30f * t);
     constexpr int sides = 9;
     constexpr std::array radii{0.f, 0.28f, 0.60f, 1.f};
     constexpr std::array opacity{0.98f, 0.75f, 0.23f, 0.f};
@@ -1524,33 +1541,30 @@ static void paintKeySpark(CCDrawNode* draw, ccColor3B tint, float width, float h
 }
 
 class KeySparkStream {
-    static constexpr double kInterval = 0.032;
     std::deque<std::pair<double, unsigned>> m_particles;
     double m_next = -1.;
     unsigned m_seed = 0;
 
     void add(double time) {
-        if (m_particles.size() >= 16) m_particles.pop_front();
+        if (m_particles.size() >= 20) m_particles.pop_front();
         m_particles.emplace_back(time, ++m_seed);
+        m_next = time + std::lerp(0.025, 0.058, static_cast<double>(sparkVariation(m_seed, 7u)));
     }
 
 public:
-    void tap(double time) {
-        add(time);
-        m_next = time + kInterval;
-    }
+    void tap(double time) { add(time); }
 
     void advance(double now, bool held) {
-        while (!m_particles.empty() && now - m_particles.front().first >= kKeySparkTime)
-            m_particles.pop_front();
-        if (!held) {
+        if (held) {
+            // A skipped frame only catches up emissions that can still be visible.
+            m_next = m_next < 0. ? now : std::max(m_next, now - kKeySparkMaxLife);
+            while (m_next <= now) add(m_next);
+        } else {
             m_next = -1.;
-            return;
         }
-        if (m_next < 0.) m_next = now;
-        if (m_next < now - kKeySparkTime)
-            m_next += std::ceil((now - kKeySparkTime - m_next) / kInterval) * kInterval;
-        for (; m_next <= now; m_next += kInterval) add(m_next);
+        std::erase_if(m_particles, [now](auto const& particle) {
+            return now - particle.first >= keySparkLifetime(particle.second);
+        });
     }
 
     void paint(CCDrawNode* draw, Look const& look, float width, float height, double now) const {

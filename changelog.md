@@ -1,3 +1,8 @@
+# v1.0.14
+
+- Spread the key edge light into a wider, softer halo.
+- Vary particle timing, direction, and lifetime for longer, irregular paths.
+
 # v1.0.13
 
 - Brighten the key edge flash and curve it around the key’s top corners.
