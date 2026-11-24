@@ -343,6 +343,8 @@ struct Look {
     float shortNoteLength = 12.f;
     float shortNoteTime = 0.050f;
     float keyDelay = 0.f;
+    bool keyEdgeFlash = false;
+    bool keyPressSparks = false;
     bool keyShadow = false;
     float keyShadowDepth = 4.f;
     float keyShadowOpacity = 0.46f;
@@ -350,6 +352,8 @@ struct Look {
     bool keyBevel = false;
     float keyBevelDepth = 3.f;
     float noteRimAlpha = 0.96f;
+    float noteRimGlow = 0.f;
+    float noteFillOpacity = 1.f;
     float noteBaseGap = 5.f;
     float jumpWidth = 1.0f;
     float noteOpacity = 0.92f;
@@ -720,6 +724,10 @@ static Look lookForKey(Look const& base, KeyDef const& k) {
         if (key == "short-note-length") kl.shortNoteLength = static_cast<float>(std::clamp(v, 1., 100.));
         if (key == "short-note-time") kl.shortNoteTime = static_cast<float>(std::clamp(v, 1., 300.)) / 1000.f;
         if (key == "key-display-delay") kl.keyDelay = static_cast<float>(std::clamp(v, 0., 1500.)) / 1000.f;
+        if (key == "key-edge-flash") kl.keyEdgeFlash = v != 0;
+        if (key == "key-press-sparks") kl.keyPressSparks = v != 0;
+        if (key == "note-rim-glow") kl.noteRimGlow = static_cast<float>(std::clamp(v, 0., 100.)) / 100.f;
+        if (key == "note-fill-opacity") kl.noteFillOpacity = static_cast<float>(std::clamp(v, 0., 100.)) / 100.f;
         if (key == "key-shadow") kl.keyShadow = v != 0;
         if (key == "key-shadow-depth") kl.keyShadowDepth = static_cast<float>(std::clamp(v, 0., 18.));
         if (key == "key-shadow-opacity") kl.keyShadowOpacity = static_cast<float>(std::clamp(v, 0., 100.)) / 100.f;
@@ -966,9 +974,18 @@ struct GradientPreset {
     bool trackGradient = false;
     float borderWidth = 0.85f;
     std::optional<GradientStop> middle = std::nullopt;
+    int background = 0x211d22;
+    int pressed = 0x4c4750;
+    StyleValues overrides;
 };
 
-static const std::array<GradientPreset, 8> kGradientPresets = {{
+static const std::array<GradientPreset, 9> kGradientPresets = {{
+    {.title = "Ice Glass", .color = 0x70eaf6, .tip = 0x7375c4, .edge = 0xe5faff, .glow = 0.f,
+     .radius = 8.f, .fade = 0.8f, .rim = 88.f, .fadeStart = 58.f, .speed = 285.f,
+     .width = 90.f, .trackGradient = true, .borderWidth = 1.25f,
+     .middle = GradientStop{0x548eea, 235, 0.50f}, .background = 0x101d30, .pressed = 0x29445e,
+     .overrides = {{"tile-opacity", 228.}, {"note-fill-opacity", 30.}, {"note-rim-glow", 32.},
+                   {"note-gradient-flow", 1.}, {"note-gradient-flow-speed", 35.}, {"key-edge-flash", 1.}}},
     {.title = "Glacier Cyan", .color = 0x42edf3, .tip = 0x4d8abb, .edge = 0xe6faff, .glow = 38.f,
      .radius = 6.f, .fade = 0.8f, .rim = 91.f, .fadeStart = 70.f, .speed = 290.f,
      .width = 98.f, .trackGradient = true, .borderWidth = 1.15f,
@@ -984,8 +1001,8 @@ static const std::array<GradientPreset, 8> kGradientPresets = {{
 
 static std::string builtInGradientPreset(GradientPreset const& profile) {
     KeyDef key;
-    key.bg = 0x211d22;
-    key.pressed = 0x4c4750;
+    key.bg = profile.background;
+    key.pressed = profile.pressed;
     key.accent = profile.color;
     key.radius = 8.f;
     key.style = {
@@ -1005,6 +1022,7 @@ static std::string builtInGradientPreset(GradientPreset const& profile) {
         stops.count = 3;
     }
     storeNoteGradient(key.style, stops);
+    for (auto const& [name, value] : profile.overrides) key.style[name] = value;
     if (profile.fadeStart >= 0.f) key.style["fade-start"] = profile.fadeStart;
     return keyStyleRecord(key, 'A');
 }
@@ -1233,9 +1251,9 @@ static float noteFillFade(Look const& look, float position, float trackHeight) {
     return timelineFade(progress, look.noteFade, look.gradNotes);
 }
 
-static void paintNoteGlow(CCDrawNode* glow, Look const& look, ccColor3B color, float opacity,
+static void paintNoteGlow(CCDrawNode* glow, Look const& look, ccColor3B color, float power,
                           float x, float origin, float w, float length, float radius,
-                          float position, float trackHeight) {
+                          float position, float trackHeight, float spread, bool followsFill) {
     struct Vertex { CCPoint point; float alpha; };
     auto clip = [](std::span<Vertex const> in, std::array<Vertex, 6>& out, float limit, bool keepAbove) {
         size_t count = 0;
@@ -1254,9 +1272,7 @@ static void paintNoteGlow(CCDrawNode* glow, Look const& look, ccColor3B color, f
         }
         return count;
     };
-    float spread = 9.f * look.glowSize;
     float direction = look.reverseFlow ? -1.f : 1.f;
-    float power = look.glowStrength * look.noteOpacity * opacity * 0.46f;
     std::array<float, kNoteExitFadeSteps + 2> rows;
     rows.front() = -position;
     for (int i = 0; i <= kNoteExitFadeSteps; ++i) rows[i + 1] = noteExitFadeRow(trackHeight, i) - position;
@@ -1282,7 +1298,8 @@ static void paintNoteGlow(CCDrawNode* glow, Look const& look, ccColor3B color, f
                 for (size_t j = 0; j < size; ++j) {
                     auto v = clipped[look.reverseFlow ? size - 1 - j : j];
                     float travel = position + v.point.y;
-                    float alpha = power * v.alpha * noteFillFade(look, travel, trackHeight) * noteExitFade(travel, trackHeight);
+                    float alpha = power * v.alpha * noteExitFade(travel, trackHeight);
+                    if (followsFill) alpha *= noteFillFade(look, travel, trackHeight);
                     vertices[j] = {{v.point.x, origin + direction * v.point.y}, noteVertexColor(color, alpha), {0.f, 0.f}};
                 }
                 appendNotePolygon(glow, std::span(vertices).first(size));
@@ -1368,7 +1385,7 @@ static void paintNote(CCDrawNode* draw, CCDrawNode* glow, Look const& look, floa
             stop.color = gradientAt(colors, reflected).color;
         }
         auto shade = shadeNote(unpackC(stop.color), look.noteTravelShade, look.noteShadeStrength, travel / trackHeight);
-        float opacity = look.noteOpacity * (stop.alpha / 255.f) * noteFillFade(look, travel, trackHeight);
+        float opacity = look.noteOpacity * look.noteFillOpacity * (stop.alpha / 255.f) * noteFillFade(look, travel, trackHeight);
         return noteVertexColor(shade, opacity * noteExitFade(travel, trackHeight));
     };
     auto rimAt = [&](float y) {
@@ -1382,10 +1399,12 @@ static void paintNote(CCDrawNode* draw, CCDrawNode* glow, Look const& look, floa
             emit(a, b);
         }
     };
-    interval(0.f, visible, [&](float a, float b) {
-        float ia = cornerInset(a, length, radius), ib = cornerInset(b, length, radius);
-        quad(draw, x + ia, x + w - ia, x + ib, x + w - ib, a, b, fillAt(a), fillAt(b));
-    });
+    if (look.noteFillOpacity > 0.f) {
+        interval(0.f, visible, [&](float a, float b) {
+            float ia = cornerInset(a, length, radius), ib = cornerInset(b, length, radius);
+            quad(draw, x + ia, x + w - ia, x + ib, x + w - ib, a, b, fillAt(a), fillAt(b));
+        });
+    }
     if (rim > 0.f && look.noteRimAlpha > 0.f) {
         interval(0.f, visible, [&](float a, float b) {
             float aOuter = cornerInset(a, length, radius), bOuter = cornerInset(b, length, radius);
@@ -1402,9 +1421,62 @@ static void paintNote(CCDrawNode* draw, CCDrawNode* glow, Look const& look, floa
         });
     }
 
-    if (!look.noteGlow || look.glowStrength <= 0.f || colors[0].alpha == 0) return;
-    auto color = look.glowCustom ? look.glowColor : unpackC(colors[0].color);
-    paintNoteGlow(glow, look, color, colors[0].alpha / 255.f, x, origin, w, length, radius, position, trackHeight);
+    if (look.noteGlow && look.glowStrength > 0.f && look.noteFillOpacity > 0.f && colors[0].alpha > 0) {
+        auto color = look.glowCustom ? look.glowColor : unpackC(colors[0].color);
+        float power = look.glowStrength * look.noteOpacity * look.noteFillOpacity * (colors[0].alpha / 255.f) * 0.46f;
+        paintNoteGlow(glow, look, color, power, x, origin, w, length, radius, position, trackHeight,
+                      9.f * look.glowSize, true);
+    }
+    if (rim > 0.f && look.noteRimAlpha > 0.f && look.noteRimGlow > 0.f) {
+        float power = look.noteOpacity * look.noteRimAlpha * look.noteRimGlow * 0.68f;
+        paintNoteGlow(glow, look, look.noteBorderColor, power, x, origin, w, length, radius, position,
+                      trackHeight, 5.f, false);
+    }
+}
+
+static constexpr double kKeyFlashTime = 0.12;
+static constexpr double kKeySparkTime = 0.24;
+
+static ccColor3B keyImpactColor(Look const& look) {
+    auto color = look.gradNotes ? unpackC(look.noteGradient[0].color) : look.accentJump;
+    return lerpC(color, {255, 255, 255}, 0.48f);
+}
+
+static void paintKeyFlash(CCDrawNode* draw, Look const& look, float width, float height, double age, bool held) {
+    if (!look.keyEdgeFlash || width < 4.f || height < 4.f) return;
+    float fade = age >= 0. ? std::clamp(1.f - static_cast<float>(age / kKeyFlashTime), 0.f, 1.f) : 0.f;
+    float opacity = (held ? 0.17f : 0.f) + 0.79f * fade * fade;
+    if (opacity <= 0.f) return;
+    const auto color = keyImpactColor(look);
+    constexpr std::array x{0.13f, 0.25f, 0.75f, 0.87f};
+    constexpr std::array xAlpha{0.f, 1.f, 1.f, 0.f};
+    const std::array y{height - 2.4f, height - 0.65f, height + 3.1f};
+    constexpr std::array yAlpha{0.f, 1.f, 0.f};
+    auto vertex = [&](size_t col, size_t row) -> ccV2F_C4B_T2F {
+        return {{x[col] * width, y[row]}, noteVertexColor(color, opacity * xAlpha[col] * yAlpha[row]), {0.f, 0.f}};
+    };
+    for (size_t row = 1; row < y.size(); ++row) {
+        for (size_t col = 1; col < x.size(); ++col) {
+            std::array points{vertex(col - 1, row - 1), vertex(col, row - 1), vertex(col, row), vertex(col - 1, row)};
+            appendNotePolygon(draw, points);
+        }
+    }
+}
+
+static void paintKeySparks(CCDrawNode* draw, Look const& look, float width, float height, double age, unsigned seed) {
+    if (!look.keyPressSparks || age < 0. || age >= kKeySparkTime) return;
+    float t = static_cast<float>(age / kKeySparkTime);
+    float fade = (1.f - t) * (1.f - t);
+    auto color = keyImpactColor(look);
+    // Five small particles stay close to the key. The seed varies successive taps without storing particles.
+    for (unsigned i = 0; i < 5; ++i) {
+        unsigned sample = (seed * 73u + i * 47u) % 101u;
+        float f = static_cast<float>(sample) / 100.f;
+        float x = width * (0.25f + 0.5f * f) + (f - 0.5f) * 12.f * t;
+        float y = height + 1.f + (1.f - (1.f - t) * (1.f - t)) * (4.f + 9.f * f);
+        float radius = (0.65f + 0.58f * f) * (1.f - 0.55f * t);
+        dnRound(draw, x - radius, y - radius, x + radius, y + radius, radius, color, 0.63f * fade, 3);
+    }
 }
 
 struct Note {
@@ -1456,6 +1528,10 @@ protected:
     CCDrawNode* m_noteFill = nullptr;
     CCDrawNode* m_keyUnder = nullptr;
     CCDrawNode* m_keyRim = nullptr;
+    CCDrawNode* m_keyEffects = nullptr;
+    double m_keyFlashAt = -1.;
+    unsigned m_keySparkSeed = 0;
+    std::deque<std::pair<double, unsigned>> m_keySparkBursts;
     double m_lastNoteFrame = -1.0;
     struct TimedInput { int source; bool down; double time; bool notes; };
     std::deque<TimedInput> m_pendingInput;
@@ -1485,6 +1561,8 @@ protected:
 
         m_border = CCDrawNode::create();
         this->addChild(m_border, 2);
+        m_keyEffects = CCDrawNode::create();
+        this->addChild(m_keyEffects, 2);
 
         m_name = CCLabelBMFont::create(name.c_str(), hasHangul(name) ? "KeyNames.fnt"_spr : "InterBold.fnt"_spr);
         m_name->setVisible(!name.empty());
@@ -1663,6 +1741,11 @@ public:
             m_held |= bit;
             if (m_presses < std::numeric_limits<int>::max()) ++m_presses;
             m_countStart = t;
+            if (m_look.keyEdgeFlash) m_keyFlashAt = t;
+            if (m_look.keyPressSparks) {
+                if (m_keySparkBursts.size() >= 8) m_keySparkBursts.pop_front();
+                m_keySparkBursts.emplace_back(t, ++m_keySparkSeed);
+            }
             setCountText();
             fitCount(t);
             if (drawNotes && m_look.timeline) {
@@ -1682,9 +1765,16 @@ public:
         }
     }
 
+    void clearKeyEffects() {
+        m_keyFlashAt = -1.;
+        m_keySparkBursts.clear();
+        m_keyEffects->clear();
+    }
+
     void resetInput() {
         m_pendingInput.clear();
         m_held = 0;
+        clearKeyEffects();
         clearNotes();
     }
 
@@ -1701,6 +1791,7 @@ public:
             m_pendingInput.pop_front();
             renderInput(event.source, event.down, nowSec(), false);
         }
+        clearKeyEffects();
         clearNotes();
     }
 
@@ -1765,6 +1856,12 @@ public:
             m_dirty = false;
             this->refreshTile();
         }
+        if (m_keyEffects->m_nBufferCount) m_keyEffects->clear();
+        if (m_look.keyEdgeFlash)
+            paintKeyFlash(m_keyEffects, m_look, m_w, m_h, m_keyFlashAt >= 0. ? now - m_keyFlashAt : -1., m_held != 0);
+        while (!m_keySparkBursts.empty() && now - m_keySparkBursts.front().first >= kKeySparkTime)
+            m_keySparkBursts.pop_front();
+        for (auto const& [time, seed] : m_keySparkBursts) paintKeySparks(m_keyEffects, m_look, m_w, m_h, now - time, seed);
         this->tickNotes(now, availableBelow);
     }
 };
@@ -2970,6 +3067,10 @@ protected:
     int m_tab = 0;
     int m_sel = -1; // 선택한 키 id
     bool m_previewPressed = false;
+    double m_previewImpactAt = -1.;
+    CCDrawNode* m_pressPreview = nullptr;
+    std::optional<Look> m_pressPreviewLook;
+    CCSize m_pressPreviewSize;
     bool m_closing = false;
     bool m_reloadLanguage = false;
     bool m_mapMode = false;
@@ -3208,6 +3309,8 @@ protected:
         m_notePreview->addChild(m_notePreviewGlow, 0);
         m_notePreview->addChild(m_notePreviewFill, 1);
         m_canvasLabels->addChild(m_notePreview);
+        m_pressPreview = CCDrawNode::create();
+        m_canvasLabels->addChild(m_pressPreview, 2);
         m_counterPreview = CCNode::create();
         m_canvasLabels->addChild(m_counterPreview);
         auto clip = CCClippingNode::create();
@@ -3679,6 +3782,7 @@ protected:
             m->setSettingValue<bool>("show-viewer", !m->getSettingValue<bool>("show-viewer"));
         } else if (id == 12) {
             m_previewPressed = !m_previewPressed;
+            m_previewImpactAt = m_previewPressed ? nowSec() : -1.;
         } else if (id == 13) {
             this->resetKey();
         } else if (id == 20) {
@@ -3908,6 +4012,16 @@ protected:
         m_counterPreview->addChild(sample, 1);
     }
 
+    void paintPressPreview(double now) {
+        m_pressPreview->clear();
+        if (!m_pressPreviewLook || !m_previewPressed) return;
+        auto const& look = *m_pressPreviewLook;
+        double age = m_previewImpactAt >= 0. ? now - m_previewImpactAt : -1.;
+        paintKeyFlash(m_pressPreview, look, m_pressPreviewSize.width, m_pressPreviewSize.height, age, true);
+        paintKeySparks(m_pressPreview, look, m_pressPreviewSize.width, m_pressPreviewSize.height, age, 1u);
+        if (age >= kKeySparkTime) m_previewImpactAt = -1.;
+    }
+
     void paintNotePreview(Look const& look, double now) {
         m_notePreviewFill->clear();
         m_notePreviewGlow->clear();
@@ -4031,6 +4145,8 @@ protected:
         m_counterPreview->removeAllChildrenWithCleanup(true);
         m_notePreview->setVisible(false);
         m_animatedNotePreview.reset();
+        m_pressPreviewLook.reset();
+        m_pressPreview->clear();
         m_depthPreview->removeAllChildrenWithCleanup(true);
         if (!m_mapMode && m_dragMode == 0) updateFit();
         redrawMinimap();
@@ -4092,6 +4208,13 @@ protected:
             if (!m_mapMode && kl.timeline && g.id == m_sel) drawNotePreview(kl, x0, kl.reverseFlow ? y0 : y1, g.w, v.sc);
 
             bool pressed = m_previewPressed;
+            if (!m_mapMode && pressed && g.id == m_sel && (kl.keyEdgeFlash || kl.keyPressSparks)) {
+                m_pressPreviewLook = kl;
+                m_pressPreviewSize = CCSize{g.w, g.h};
+                m_pressPreview->setPosition({x0, y0});
+                m_pressPreview->setScale(v.sc);
+                paintPressPreview(nowSec());
+            }
             ccColor3B fill = pressed ? kl.pressed : kl.tile;
             float a = pressed ? 1.f : kl.tileOpacity / 255.f;
             auto previewDepth = CCDrawNode::create();
@@ -5001,6 +5124,8 @@ protected:
             [this, id](float v) { if (auto k = keyById(id)) k->borderW = v; this->commitKey(id); });
         settingSlider("Idle opacity", "tile-opacity", 0.f, 255.f, 1.f, true);
         settingToggle("Press glow", "show-glow");
+        localToggle("Key edge flash", "key-edge-flash", false);
+        localToggle("Press particles", "key-press-sparks", false);
         settingToggle("Key counters", "show-counter");
         localToggle("Box gradient", "tile-idle-gradient", false);
         settingColor("Gradient end color", "gradient-color");
@@ -5057,10 +5182,12 @@ protected:
         localChoice("Brightness along track", "note-travel-shade", {"Off", "Darker upward", "Brighter upward"}, 0);
         localSlider("Track brightness strength %", "note-shade-strength", 0.f, 100.f, 5.f, 65.f);
         this->settingSlider("Note opacity %", "note-opacity", 20.f, 100.f, 1.f);
+        localSlider("Note fill opacity %", "note-fill-opacity", 0.f, 100.f, 5.f, 100.f);
         this->settingSlider("Note fade", "note-fade", 0.f, 3.f, 0.1f);
         this->settingSlider("Note round %", "note-radius", 0.f, 50.f, 1.f);
         this->settingSlider("Note border", "note-border", 0.f, 4.f, 0.5f);
         this->settingColor("Note border color", "note-border-color");
+        localSlider("Note border glow %", "note-rim-glow", 0.f, 100.f, 5.f, 0.f);
         this->settingSlider("Glow strength %", "note-glow-strength", 0.f, 200.f, 5.f);
         this->settingSlider("Glow size %", "note-glow-size", 50.f, 250.f, 5.f);
         this->settingToggle("Custom glow color", "note-glow-custom");
@@ -5597,9 +5724,11 @@ public:
             this->removeFromParentAndCleanup(true);
             return;
         }
-        if (m_animatedNotePreview && !m_modal) {
+        if (!m_modal && (m_animatedNotePreview || (m_previewImpactAt >= 0. && m_pressPreviewLook))) {
             double now = nowSec();
-            if (now - m_lastNotePreviewFrame >= 1. / 30.) paintNotePreview(*m_animatedNotePreview, now);
+            if (m_animatedNotePreview && now - m_lastNotePreviewFrame >= 1. / 30.)
+                paintNotePreview(*m_animatedNotePreview, now);
+            if (m_previewImpactAt >= 0. && m_pressPreviewLook) paintPressPreview(now);
         }
     }
 };

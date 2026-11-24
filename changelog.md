@@ -1,3 +1,8 @@
+# v1.0.12
+
+- Add the Ice Glass preset with a translucent note fill, independent rim glow, and key edge flashes.
+- Add optional short press particles and preview the effects in the editor.
+
 # v1.0.11
 
 - Animate note gradient colors per key with adjustable direction and speed and a live editor preview.
