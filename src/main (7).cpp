@@ -1434,7 +1434,7 @@ static void paintNote(CCDrawNode* draw, CCDrawNode* glow, Look const& look, floa
     }
 }
 
-static constexpr double kKeyFlashTime = 0.12;
+static constexpr double kKeyFlashTime = 0.16;
 static constexpr double kKeySparkTime = 0.24;
 
 static ccColor3B keyImpactColor(Look const& look) {
@@ -1442,42 +1442,128 @@ static ccColor3B keyImpactColor(Look const& look) {
     return lerpC(color, {255, 255, 255}, 0.48f);
 }
 
-static void paintKeyFlash(CCDrawNode* draw, Look const& look, float width, float height, double age, bool held) {
+static float keyTileScale(Look const& look, float width, float height) {
+    float radius = std::min(std::max(look.radius * height, 2.f), height / 2.f);
+    return std::clamp(radius / kBaseR, 0.2f, std::max(0.2f, std::min(width, height) / kCap));
+}
+
+static void paintKeyFlash(CCDrawNode* draw, Look const& look, float width, float height, double age, float sustain) {
     if (!look.keyEdgeFlash || width < 4.f || height < 4.f) return;
-    float fade = age >= 0. ? std::clamp(1.f - static_cast<float>(age / kKeyFlashTime), 0.f, 1.f) : 0.f;
-    float opacity = (held ? 0.17f : 0.f) + 0.79f * fade * fade;
-    if (opacity <= 0.f) return;
-    const auto color = keyImpactColor(look);
-    constexpr std::array x{0.13f, 0.25f, 0.75f, 0.87f};
-    constexpr std::array xAlpha{0.f, 1.f, 1.f, 0.f};
-    const std::array y{height - 2.4f, height - 0.65f, height + 3.1f};
-    constexpr std::array yAlpha{0.f, 1.f, 0.f};
-    auto vertex = [&](size_t col, size_t row) -> ccV2F_C4B_T2F {
-        return {{x[col] * width, y[row]}, noteVertexColor(color, opacity * xAlpha[col] * yAlpha[row]), {0.f, 0.f}};
-    };
-    for (size_t row = 1; row < y.size(); ++row) {
-        for (size_t col = 1; col < x.size(); ++col) {
-            std::array points{vertex(col - 1, row - 1), vertex(col, row - 1), vertex(col, row), vertex(col - 1, row)};
-            appendNotePolygon(draw, points);
+    float impact = age >= 0. ? std::clamp(1.f - static_cast<float>(age / kKeyFlashTime), 0.f, 1.f) : 0.f;
+    float opacity = std::min(1.f, 0.68f * sustain + 0.50f * impact * impact);
+    if (opacity < 0.004f) return;
+
+    const float radius = std::min(kBaseR * keyTileScale(look, width, height), std::min(width, height) * 0.5f);
+    const float outer = std::clamp(width * 0.13f, 2.4f, 6.2f);
+    const std::array offsets{-std::min(radius * 0.86f, 2.6f), -0.60f, 0.f,
+                             outer * 0.17f, outer * 0.42f, outer * 0.72f, outer};
+    constexpr std::array falloff{0.f, 0.78f, 1.f, 0.71f, 0.32f, 0.09f, 0.f};
+    const auto tint = keyImpactColor(look);
+    std::array<std::array<ccV2F_C4B_T2F, offsets.size()>, 10> vertices;
+    for (size_t i = 0; i < vertices.size(); ++i) {
+        const bool left = i < 5;
+        const float step = static_cast<float>(left ? i : 9 - i) / 4.f;
+        const float angle = (left ? 1.f : -1.f) * (0.42f * (1.f - step)) * kPi + 0.5f * kPi;
+        const float nx = std::cos(angle), ny = std::sin(angle);
+        const float cx = left ? radius : width - radius;
+        const float cy = height - radius;
+        const float across = step * (2.f - step);
+        for (size_t j = 0; j < offsets.size(); ++j) {
+            float extent = radius + offsets[j];
+            auto color = lerpC(tint, {255, 255, 255}, 0.80f * falloff[j]);
+            vertices[i][j] = {{cx + nx * extent, cy + ny * extent},
+                              noteVertexColor(color, opacity * falloff[j] * across), {0.f, 0.f}};
+        }
+    }
+    for (size_t i = 1; i < vertices.size(); ++i) {
+        for (size_t j = 1; j < offsets.size(); ++j) {
+            std::array quad{vertices[i - 1][j - 1], vertices[i][j - 1], vertices[i][j], vertices[i - 1][j]};
+            appendNotePolygon(draw, quad);
         }
     }
 }
 
-static void paintKeySparks(CCDrawNode* draw, Look const& look, float width, float height, double age, unsigned seed) {
-    if (!look.keyPressSparks || age < 0. || age >= kKeySparkTime) return;
+static void paintKeySpark(CCDrawNode* draw, ccColor3B tint, float width, float height, double age, unsigned seed) {
+    if (age < 0. || age >= kKeySparkTime) return;
     float t = static_cast<float>(age / kKeySparkTime);
     float fade = (1.f - t) * (1.f - t);
-    auto color = keyImpactColor(look);
-    // Five small particles stay close to the key. The seed varies successive taps without storing particles.
-    for (unsigned i = 0; i < 5; ++i) {
-        unsigned sample = (seed * 73u + i * 47u) % 101u;
-        float f = static_cast<float>(sample) / 100.f;
-        float x = width * (0.25f + 0.5f * f) + (f - 0.5f) * 12.f * t;
-        float y = height + 1.f + (1.f - (1.f - t) * (1.f - t)) * (4.f + 9.f * f);
-        float radius = (0.65f + 0.58f * f) * (1.f - 0.55f * t);
-        dnRound(draw, x - radius, y - radius, x + radius, y + radius, radius, color, 0.63f * fade, 3);
+    float f = static_cast<float>((seed * 73u) % 101u) / 100.f;
+    float rise = static_cast<float>((seed * 53u + 17u) % 103u) / 102.f;
+    float x = width * (0.22f + 0.56f * f) + (f - 0.5f) * 11.f * t;
+    float y = height + 0.65f + (1.f - fade) * (6.f + 10.f * rise);
+    float radius = (0.68f + 0.40f * f) * (1.f - 0.35f * t);
+    constexpr int sides = 9;
+    constexpr std::array radii{0.f, 0.28f, 0.60f, 1.f};
+    constexpr std::array opacity{0.98f, 0.75f, 0.23f, 0.f};
+    // One mesh per particle: a bright center falls off smoothly to a transparent edge.
+    std::array<ccColor4B, radii.size()> colors;
+    for (size_t i = 0; i < colors.size(); ++i)
+        colors[i] = noteVertexColor(lerpC(tint, {255, 255, 255}, opacity[i] * 0.75f), opacity[i] * fade);
+    static const auto directions = [] {
+        std::array<CCPoint, sides> result;
+        for (int i = 0; i < sides; ++i) {
+            float angle = 2.f * kPi * i / sides;
+            result[i] = CCPoint{std::cos(angle), std::sin(angle)};
+        }
+        return result;
+    }();
+    auto vertex = [&](int side, size_t ring) -> ccV2F_C4B_T2F {
+        auto direction = directions[side % sides];
+        float r = radius * radii[ring];
+        return {{x + r * direction.x, y + r * direction.y}, colors[ring], {0.f, 0.f}};
+    };
+    for (int side = 0; side < sides; ++side) {
+        std::array center{vertex(side, 0), vertex(side, 1), vertex(side + 1, 1)};
+        appendNotePolygon(draw, center);
+        for (size_t ring = 2; ring < radii.size(); ++ring) {
+            std::array quad{vertex(side, ring - 1), vertex(side, ring),
+                            vertex(side + 1, ring), vertex(side + 1, ring - 1)};
+            appendNotePolygon(draw, quad);
+        }
     }
 }
+
+class KeySparkStream {
+    static constexpr double kInterval = 0.032;
+    std::deque<std::pair<double, unsigned>> m_particles;
+    double m_next = -1.;
+    unsigned m_seed = 0;
+
+    void add(double time) {
+        if (m_particles.size() >= 16) m_particles.pop_front();
+        m_particles.emplace_back(time, ++m_seed);
+    }
+
+public:
+    void tap(double time) {
+        add(time);
+        m_next = time + kInterval;
+    }
+
+    void advance(double now, bool held) {
+        while (!m_particles.empty() && now - m_particles.front().first >= kKeySparkTime)
+            m_particles.pop_front();
+        if (!held) {
+            m_next = -1.;
+            return;
+        }
+        if (m_next < 0.) m_next = now;
+        if (m_next < now - kKeySparkTime)
+            m_next += std::ceil((now - kKeySparkTime - m_next) / kInterval) * kInterval;
+        for (; m_next <= now; m_next += kInterval) add(m_next);
+    }
+
+    void paint(CCDrawNode* draw, Look const& look, float width, float height, double now) const {
+        auto tint = keyImpactColor(look);
+        for (auto const& [time, seed] : m_particles)
+            paintKeySpark(draw, tint, width, height, now - time, seed);
+    }
+
+    void clear() {
+        m_next = -1.;
+        m_particles.clear();
+    }
+};
 
 struct Note {
     int source = 0;
@@ -1530,8 +1616,7 @@ protected:
     CCDrawNode* m_keyRim = nullptr;
     CCDrawNode* m_keyEffects = nullptr;
     double m_keyFlashAt = -1.;
-    unsigned m_keySparkSeed = 0;
-    std::deque<std::pair<double, unsigned>> m_keySparkBursts;
+    KeySparkStream m_keySparks;
     double m_lastNoteFrame = -1.0;
     struct TimedInput { int source; bool down; double time; bool notes; };
     std::deque<TimedInput> m_pendingInput;
@@ -1701,8 +1786,7 @@ public:
         m_h = h;
         this->setContentSize({m_w, m_h});
 
-        float r = std::min(std::max(l.radius * m_h, 2.f), m_h / 2.f);
-        float s = std::clamp(r / kBaseR, 0.2f, std::max(0.2f, std::min(m_w, m_h) / kCap));
+        float s = keyTileScale(l, m_w, m_h);
         if (m_lw != m_w || m_lh != m_h || m_ls != s) {
             m_lw = m_w; m_lh = m_h; m_ls = s;
             fitSize(m_tile, m_w, m_h, s);
@@ -1742,10 +1826,7 @@ public:
             if (m_presses < std::numeric_limits<int>::max()) ++m_presses;
             m_countStart = t;
             if (m_look.keyEdgeFlash) m_keyFlashAt = t;
-            if (m_look.keyPressSparks) {
-                if (m_keySparkBursts.size() >= 8) m_keySparkBursts.pop_front();
-                m_keySparkBursts.emplace_back(t, ++m_keySparkSeed);
-            }
+            if (m_look.keyPressSparks) m_keySparks.tap(t);
             setCountText();
             fitCount(t);
             if (drawNotes && m_look.timeline) {
@@ -1755,7 +1836,9 @@ public:
                 m_notes.push_back(n);
             }
         } else if (m_held & bit) {
+            if (m_look.keyPressSparks) m_keySparks.advance(t, true);
             m_held &= ~bit;
+            if (!m_held && m_look.keyPressSparks) m_keySparks.advance(t, false);
             for (auto it = m_notes.rbegin(); it != m_notes.rend(); ++it) {
                 if (it->source == source && it->end < 0) {
                     it->end = t;
@@ -1767,7 +1850,7 @@ public:
 
     void clearKeyEffects() {
         m_keyFlashAt = -1.;
-        m_keySparkBursts.clear();
+        m_keySparks.clear();
         m_keyEffects->clear();
     }
 
@@ -1858,10 +1941,14 @@ public:
         }
         if (m_keyEffects->m_nBufferCount) m_keyEffects->clear();
         if (m_look.keyEdgeFlash)
-            paintKeyFlash(m_keyEffects, m_look, m_w, m_h, m_keyFlashAt >= 0. ? now - m_keyFlashAt : -1., m_held != 0);
-        while (!m_keySparkBursts.empty() && now - m_keySparkBursts.front().first >= kKeySparkTime)
-            m_keySparkBursts.pop_front();
-        for (auto const& [time, seed] : m_keySparkBursts) paintKeySparks(m_keyEffects, m_look, m_w, m_h, now - time, seed);
+            paintKeyFlash(m_keyEffects, m_look, m_w, m_h, m_keyFlashAt >= 0. ? now - m_keyFlashAt : -1.,
+                          m_held ? 1.f : m_press);
+        if (m_look.keyPressSparks) {
+            m_keySparks.advance(now, m_held != 0);
+            m_keySparks.paint(m_keyEffects, m_look, m_w, m_h, now);
+        } else {
+            m_keySparks.clear();
+        }
         this->tickNotes(now, availableBelow);
     }
 };
@@ -3068,6 +3155,7 @@ protected:
     int m_sel = -1; // 선택한 키 id
     bool m_previewPressed = false;
     double m_previewImpactAt = -1.;
+    KeySparkStream m_previewSparks;
     CCDrawNode* m_pressPreview = nullptr;
     std::optional<Look> m_pressPreviewLook;
     CCSize m_pressPreviewSize;
@@ -3783,6 +3871,7 @@ protected:
         } else if (id == 12) {
             m_previewPressed = !m_previewPressed;
             m_previewImpactAt = m_previewPressed ? nowSec() : -1.;
+            m_previewSparks.clear();
         } else if (id == 13) {
             this->resetKey();
         } else if (id == 20) {
@@ -4017,9 +4106,14 @@ protected:
         if (!m_pressPreviewLook || !m_previewPressed) return;
         auto const& look = *m_pressPreviewLook;
         double age = m_previewImpactAt >= 0. ? now - m_previewImpactAt : -1.;
-        paintKeyFlash(m_pressPreview, look, m_pressPreviewSize.width, m_pressPreviewSize.height, age, true);
-        paintKeySparks(m_pressPreview, look, m_pressPreviewSize.width, m_pressPreviewSize.height, age, 1u);
-        if (age >= kKeySparkTime) m_previewImpactAt = -1.;
+        paintKeyFlash(m_pressPreview, look, m_pressPreviewSize.width, m_pressPreviewSize.height, age, 1.f);
+        if (look.keyPressSparks) {
+            m_previewSparks.advance(now, true);
+            m_previewSparks.paint(m_pressPreview, look, m_pressPreviewSize.width, m_pressPreviewSize.height, now);
+        } else {
+            m_previewSparks.clear();
+        }
+        if (age >= kKeyFlashTime) m_previewImpactAt = -1.;
     }
 
     void paintNotePreview(Look const& look, double now) {
@@ -5724,11 +5818,12 @@ public:
             this->removeFromParentAndCleanup(true);
             return;
         }
-        if (!m_modal && (m_animatedNotePreview || (m_previewImpactAt >= 0. && m_pressPreviewLook))) {
+        bool runningPressPreview = m_pressPreviewLook && (m_previewImpactAt >= 0. || m_pressPreviewLook->keyPressSparks);
+        if (!m_modal && (m_animatedNotePreview || runningPressPreview)) {
             double now = nowSec();
             if (m_animatedNotePreview && now - m_lastNotePreviewFrame >= 1. / 30.)
                 paintNotePreview(*m_animatedNotePreview, now);
-            if (m_previewImpactAt >= 0. && m_pressPreviewLook) paintPressPreview(now);
+            if (runningPressPreview) paintPressPreview(now);
         }
     }
 };

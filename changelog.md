@@ -1,3 +1,8 @@
+# v1.0.13
+
+- Brighten the key edge flash and curve it around the key’s top corners.
+- Emit smaller, softly glowing particles throughout a hold and let them fade after release.
+
 # v1.0.12
 
 - Add the Ice Glass preset with a translucent note fill, independent rim glow, and key edge flashes.
